@@ -1,0 +1,35 @@
+cat > app/templates/read.html <<'EOF'
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ title }}. Foraged</title>
+    <link rel="stylesheet" href="{{ request.url_for('static', path='app.css') }}" />
+  </head>
+  <body>
+    <div class="container">
+      <div class="topbar">
+        <div>
+          <div class="breadcrumb">
+            <a href="{{ request.url_for('home') }}">← Library</a>
+          </div>
+          <h1>{{ title }}</h1>
+          <div class="meta">{{ rel_path }}</div>
+        </div>
+        <a class="btn" href="{{ request.url_for('file', rel_path=rel_path) }}">Download</a>
+      </div>
+
+      {% if file_type == 'pdf' %}
+        <div class="reader">
+          <embed src="{{ request.url_for('file', rel_path=rel_path) }}" type="application/pdf" />
+        </div>
+      {% else %}
+        <div class="notice">
+          EPUB embedded reading is coming next. For now, use Download.
+        </div>
+      {% endif %}
+    </div>
+  </body>
+</html>
+EOF
