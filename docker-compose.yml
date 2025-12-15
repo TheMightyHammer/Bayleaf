@@ -1,0 +1,20 @@
+services:
+  foraged:
+    container_name: foraged
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      FORAGED_ENV: dev
+      FORAGED_HOST: 0.0.0.0
+      FORAGED_PORT: 8000
+    restart: unless-stopped
+
+    # Future-ready mounts (commented out for now)
+    # volumes:
+    #   # Persist the SQLite DB later when we add it
+    #   - ./data:/app/data
+    #   # Mount your cookbook library read-only
+    #   - /path/on/host/cookbooks:/cookbooks:ro
