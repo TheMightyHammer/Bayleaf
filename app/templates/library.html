@@ -1,60 +1,71 @@
-cat > app/templates/library.html <<'EOF'
+
 <!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Bayleaf</title>
-    <link rel="stylesheet" href="{{ request.url_for('static', path='app.css') }}" />
+    <link rel="stylesheet" href="/static/app.css" />
   </head>
   <body>
     <div class="container">
       <div class="topbar">
-        <div>
+        <div class="brandline">
           <h1>Bayleaf</h1>
           <div class="meta">
-            Library: <code>{{ library_dir }}</code>. Books: {{ total }}
-            {% if q %}. Filter: <code>{{ q }}</code>{% endif %}
+            {% if cookbooks %}{{ cookbooks|length }} books{% else %}No books yet{% endif %}
           </div>
         </div>
 
-        <form class="search" method="get" action="{{ request.url_for('home') }}">
-          <input name="q" value="{{ q or '' }}" placeholder="Search title or author" />
-          <button type="submit">Search</button>
-          {% if q %}
-            <a class="btn" href="{{ request.url_for('home') }}">Clear</a>
-          {% endif %}
+        <form class="searchrow" method="get" action="/">
+          <div class="searchpill">
+            <input
+              type="text"
+              name="q"
+              value="{{ q or '' }}"
+              placeholder="Search books or recipes"
+              autocomplete="off"
+            />
+          </div>
+
+          <div class="selectpill" title="Sort">
+            <select name="sort">
+              <option value="title" {% if sort == 'title' %}selected{% endif %}>Title</option>
+              <option value="recent" {% if sort == 'recent' %}selected{% endif %}>Recently added</option>
+              <option value="type" {% if sort == 'type' %}selected{% endif %}>File type</option>
+            </select>
+          </div>
+
+          <button class="pillbtn" type="submit">Search</button>
         </form>
       </div>
 
-      {% if notice %}
-        <div class="notice">
-          {{ notice }}
+      {% if not cookbooks %}
+        <div class="empty">
+          No cookbooks found. Check your library mount and that it contains .epub or .pdf files.
         </div>
-      {% endif %}
+      {% else %}
+        <div class="grid">
+          {% for book in cookbooks %}
+            <div class="card">
+              <div class="cover">
+                {% if book.thumb_url %}
+                  <img src="{{ book.thumb_url }}" alt="Cover" loading="lazy" />
+                {% else %}
+                  <div class="placeholder">No cover yet</div>
+                {% endif %}
+              </div>
 
-      {% if books|length == 0 %}
-        <div class="notice">
-          No cookbooks found. Put some <code>.epub</code> or <code>.pdf</code> files in your library folder.
-        </div>
-      {% endif %}
+              <div class="title" title="{{ book.display_name }}">{{ book.display_name }}</div>
+              <div class="subtitle">{{ book.ext|upper }}</div>
 
-      <div class="grid">
-        {% for b in books %}
-          <div class="card">
-            <div class="cover"></div>
-            <div class="card-body">
-              <div class="title" title="{{ b.title }}">{{ b.title }}</div>
-              <div class="author" title="{{ b.author }}">{{ b.author if b.author else " " }}</div>
-              <div class="row">
-                <span class="chip">{{ b.file_type }}</span>
-                <a class="btn" href="{{ request.url_for('read_book', rel_path=b.rel_path) }}">Open</a>
+              <div class="actions">
+                <a class="openlink" href="/open/{{ book.rel_path }}">Open</a>
               </div>
             </div>
-          </div>
-        {% endfor %}
-      </div>
+          {% endfor %}
+        </div>
+      {% endif %}
     </div>
   </body>
 </html>
-EOF

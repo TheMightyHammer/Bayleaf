@@ -17,8 +17,9 @@ class Cookbook:
     suffix: str
 
 
-def list_cookbooks(root: Path) -> List[Cookbook]:
+def list_cookbooks(root: Path | str) -> List[Cookbook]:
     """Recursively list cookbooks under root."""
+    root = Path(root)
     if not root.exists():
         return []
     items: List[Cookbook] = []

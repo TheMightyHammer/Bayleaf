@@ -8,6 +8,11 @@ from functools import lru_cache
 from pathlib import Path
 import os
 
+def get_db_path() -> str:
+    return os.getenv("BAYLEAF_DB_PATH", "/data/bayleaf.db")
+
+def get_library_dir() -> str:
+    return os.getenv("BAYLEAF_LIBRARY_DIR", "/cookbooks")
 
 @dataclass(frozen=True)
 class Settings:

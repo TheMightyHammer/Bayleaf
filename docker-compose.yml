@@ -7,18 +7,22 @@ services:
       dockerfile: docker/Dockerfile
     ports:
       - "8000:8000"
+    env_file:
+      - .env
     environment:
       # Preferred env var names (use these going forward)
       BAYLEAF_ENV: dev
       BAYLEAF_HOST: 0.0.0.0
       BAYLEAF_PORT: 8000
       BAYLEAF_LIBRARY_DIR: /cookbooks
+      BAYLEAF_RELOAD: "true"
 
       # Backwards-compat aliases. Safe to remove later once code is standardised.
       FORAGED_ENV: dev
       FORAGED_HOST: 0.0.0.0
       FORAGED_PORT: 8000
       FORAGED_LIBRARY_DIR: /cookbooks
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
@@ -28,4 +32,6 @@ services:
     volumes:
       # Set BAYLEAF_LIBRARY_HOST_DIR in a local .env file to point at your existing cookbook folder.
       # Example: BAYLEAF_LIBRARY_HOST_DIR=/Users/charles/Documents/ebooks/Cookbooks
-      - ${BAYLEAF_LIBRARY_HOST_DIR:-./cookbooks}:/cookbooks:ro
+      - ${BAYLEAF_LIBRARY_HOST_DIR:?Set BAYLEAF_LIBRARY_HOST_DIR in .env}:/cookbooks:ro
+      - ./data:/data
+      - ./app:/app/app
