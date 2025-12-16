@@ -4,14 +4,14 @@ cat > app/templates/library.html <<'EOF'
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Foraged</title>
+    <title>Bayleaf</title>
     <link rel="stylesheet" href="{{ request.url_for('static', path='app.css') }}" />
   </head>
   <body>
     <div class="container">
       <div class="topbar">
         <div>
-          <h1>Foraged</h1>
+          <h1>Bayleaf</h1>
           <div class="meta">
             Library: <code>{{ library_dir }}</code>. Books: {{ total }}
             {% if q %}. Filter: <code>{{ q }}</code>{% endif %}

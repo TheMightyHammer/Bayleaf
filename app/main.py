@@ -15,7 +15,7 @@ from starlette.responses import FileResponse
 from app.config import get_settings
 from app.library import ALLOWED_SUFFIXES, filter_cookbooks, list_cookbooks
 
-APP_NAME = "Foraged"
+APP_NAME = "Bayleaf"
 
 
 def _get_env(name: str, default: str) -> str:
@@ -55,7 +55,7 @@ def create_app() -> FastAPI:
 
     @app.get("/health", response_class=JSONResponse)
     def health() -> dict:
-        return {"status": "ok", "app": APP_NAME, "env": _get_env("FORAGED_ENV", "dev")}
+        return {"status": "ok", "app": APP_NAME, "env": _get_env("Bayleaf_ENV", "dev")}
 
     @app.get("/", response_class=HTMLResponse, name="home")
     def home(request: Request, q: str | None = None):
@@ -68,7 +68,7 @@ def create_app() -> FastAPI:
         if not settings.library_dir.exists():
             notice = (
                 f"Library folder not found at {settings.library_dir}. "
-                "Check your compose volume and FORAGED_LIBRARY_HOST_DIR."
+                "Check your compose volume and Bayleaf_LIBRARY_HOST_DIR."
             )
 
         return templates.TemplateResponse(
@@ -118,8 +118,8 @@ if __name__ == "__main__":
 
     uvicorn.run(
         "app.main:app",
-        host=_get_env("FORAGED_HOST", "0.0.0.0"),
-        port=int(_get_env("FORAGED_PORT", "8000")),
-        reload=_get_env("FORAGED_RELOAD", "true").lower() in {"1", "true", "yes"},
-        log_level=_get_env("FORAGED_LOG_LEVEL", "info"),
+        host=_get_env("Bayleaf_HOST", "0.0.0.0"),
+        port=int(_get_env("Bayleaf_PORT", "8000")),
+        reload=_get_env("Bayleaf_RELOAD", "true").lower() in {"1", "true", "yes"},
+        log_level=_get_env("Bayleaf_LOG_LEVEL", "info"),
     )
