@@ -5,12 +5,21 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Bayleaf</title>
     <link rel="stylesheet" href="{{ request.url_for('static', path='app.css') }}" />
+    <link rel="icon" href="{{ request.url_for('static', path='favicon.ico') }}">
+    <meta name="theme-color" content="#5F7A6A" />
   </head>
   <body>
     <div class="container">
       <div class="topbar">
         <div class="brandline">
-          <h1>Bayleaf</h1>
+          <div class="brand">
+            <img
+              src="{{ request.url_for('static', path='Bayleaf_Logo.png') }}"
+              alt="Bayleaf logo"
+              class="brand-logo"
+            />
+            <h1>Bayleaf</h1>
+          </div>
           <div class="meta">
             {% if total %}{{ total }} book{% if total != 1 %}s{% endif %}{% else %}No books yet{% endif %}
           </div>
@@ -25,6 +34,10 @@
               placeholder="Search titles"
               autocomplete="off"
             />
+          </div>
+          <div class="grid-size-control" id="gridSizeControl" aria-label="Grid size control">
+            <label for="gridSize">Size</label>
+            <input id="gridSize" type="range" min="220" max="420" step="10" value="300" />
           </div>
           <button class="pillbtn" type="submit">Search</button>
         </form>
@@ -55,16 +68,6 @@
               </div>
 
               <div class="title" title="{{ book.name }}">{{ book.name }}</div>
-              <div class="subtitle">{{ book.suffix|default('')|upper }}</div>
-
-              <div class="actions">
-                <a
-                  class="openlink"
-                  href="{{ request.url_for('read_book', rel_path=book.rel_path) }}"
-                >
-                  Open
-                </a>
-              </div>
             </div>
           {% endfor %}
         </div>
@@ -74,6 +77,41 @@
       const input = document.querySelector('input[name="q"]');
       const sortSelect = document.querySelector('select[name="sort"]');
       const grid = document.querySelector('.grid');
+
+      // Grid size slider (CSS should consume --card-size for grid columns)
+      const gridSizeControl = document.getElementById('gridSizeControl');
+      const gridSizeSlider = document.getElementById('gridSize');
+      const rootEl = document.documentElement;
+      const GRID_SIZE_KEY = 'bayleaf_grid_size_px';
+
+      function applyGridSize(px) {
+        rootEl.style.setProperty('--card-size', `${px}px`);
+      }
+
+      function setGridSizeVisible() {
+        // Slider should only show on wider screens. CSS can also enforce this.
+        const show = window.matchMedia('(min-width: 901px)').matches;
+        if (gridSizeControl) gridSizeControl.style.display = show ? 'flex' : 'none';
+      }
+
+      if (gridSizeSlider) {
+        const saved = localStorage.getItem(GRID_SIZE_KEY);
+        if (saved) {
+          gridSizeSlider.value = saved;
+          applyGridSize(saved);
+        } else {
+          applyGridSize(gridSizeSlider.value);
+        }
+
+        gridSizeSlider.addEventListener('input', (e) => {
+          const val = e.target.value;
+          applyGridSize(val);
+          localStorage.setItem(GRID_SIZE_KEY, val);
+        });
+
+        setGridSizeVisible();
+        window.addEventListener('resize', setGridSizeVisible);
+      }
 
       // If the page rendered with no grid (e.g. empty state), skip live search wiring.
       if (input && grid) {
@@ -115,11 +153,6 @@
               </div>
 
               <div class="title" title="${esc(name)}">${esc(name)}</div>
-              <div class="subtitle">${esc(String(suffix).toUpperCase())}</div>
-
-              <div class="actions">
-                <a class="openlink" href="${readHref}">Open</a>
-              </div>
             </div>
           `;
         }

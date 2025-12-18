@@ -5,6 +5,7 @@
   --ink: #1f2a24;
   --ink-soft: rgba(31, 42, 36, 0.75);
   --ring: rgba(244, 241, 236, 0.85);
+  --card-size: 260px;
 }
 
 * { box-sizing: border-box; }
@@ -40,6 +41,18 @@ body {
   gap: 12px;
 }
 
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.brand img {
+  height: 40px;
+  width: auto;
+  display: block;
+}
+
 .brandline h1 {
   margin: 0;
   font-size: 26px;
@@ -55,6 +68,76 @@ body {
   display: flex;
   gap: 10px;
   align-items: center;
+}
+
+.toolbar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.grid-size-control {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 999px;
+  background: rgba(244, 241, 236, 0.18);
+  border: 1px solid rgba(244, 241, 236, 0.35);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+.grid-size-control label {
+  font-size: 13px;
+  color: rgba(244, 241, 236, 0.85);
+  white-space: nowrap;
+}
+
+.grid-size-control input[type="range"] {
+  width: 180px;
+  appearance: none;
+  background: transparent;
+}
+
+.grid-size-control input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  background: rgba(95, 122, 106, 0.6);
+  border-radius: 999px;
+}
+
+.grid-size-control input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -6px;
+  border-radius: 50%;
+  background: var(--parchment);
+  border: 2px solid rgba(95, 122, 106, 0.8);
+  cursor: pointer;
+}
+
+.grid-size-control input[type="range"]::-moz-range-track {
+  height: 4px;
+  background: rgba(95, 122, 106, 0.6);
+  border-radius: 999px;
+}
+
+.grid-size-control input[type="range"]::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--parchment);
+  border: 2px solid rgba(95, 122, 106, 0.8);
+  cursor: pointer;
+}
+
+.grid-size-control output {
+  font-size: 12px;
+  color: rgba(244, 241, 236, 0.9);
+  min-width: 44px;
+  text-align: right;
 }
 
 .searchpill {
@@ -130,13 +213,18 @@ body {
   display: grid;
   gap: 16px;
   /* Larger cards on wide screens. This typically yields ~5 columns on a full-size desktop */
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(var(--card-size), 1fr));
 }
 
 @media (max-width: 640px) {
   .grid {
-    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    --card-size: 180px;
+    grid-template-columns: repeat(auto-fit, minmax(var(--card-size), 1fr));
     gap: 12px;
+  }
+
+  .grid-size-control {
+    display: none;
   }
 }
 
@@ -328,4 +416,10 @@ body {
 
 .breadcrumb a:hover {
   text-decoration: underline;
+}
+
+@media (max-width: 900px) {
+  .grid-size-control {
+    display: none;
+  }
 }

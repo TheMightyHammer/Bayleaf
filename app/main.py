@@ -9,6 +9,8 @@ import os
 import sqlite3
 import hashlib
 from pathlib import Path
+import zipfile
+import xml.etree.ElementTree as ET
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -53,6 +55,91 @@ def _normalise_search_query(q: str | None) -> str:
         return ""
     return qn
 
+
+# --- EPUB metadata helpers (no external deps) ---
+
+def _epub_metadata(epub_path: Path) -> tuple[str | None, str | None, str | None]:
+    """Extract (title, author, isbn) from an EPUB.
+
+    This avoids adding heavy dependencies. Best-effort only.
+    """
+    try:
+        with zipfile.ZipFile(epub_path, "r") as zf:
+            # 1) Locate the OPF via META-INF/container.xml
+            try:
+                container_xml = zf.read("META-INF/container.xml")
+            except KeyError:
+                return (None, None, None)
+
+            try:
+                c_root = ET.fromstring(container_xml)
+            except Exception:
+                return (None, None, None)
+
+            # Namespaces vary. Use wildcard namespace.
+            opf_path = None
+            for el in c_root.findall(".//{*}rootfile"):
+                full_path = el.attrib.get("full-path") or el.attrib.get("full_path")
+                if full_path:
+                    opf_path = full_path
+                    break
+            if not opf_path:
+                return (None, None, None)
+
+            try:
+                opf_bytes = zf.read(opf_path)
+            except KeyError:
+                return (None, None, None)
+
+            try:
+                o_root = ET.fromstring(opf_bytes)
+            except Exception:
+                return (None, None, None)
+
+            def _first_text(xpath: str) -> str | None:
+                node = o_root.find(xpath)
+                if node is None:
+                    return None
+                txt = (node.text or "").strip()
+                return txt or None
+
+            # Prefer Dublin Core metadata
+            title = _first_text(".//{*}metadata/{*}title") or _first_text(".//{*}title")
+
+            # There can be multiple creators. Join distinct values.
+            creators = []
+            for c in o_root.findall(".//{*}metadata/{*}creator") + o_root.findall(".//{*}creator"):
+                t = (c.text or "").strip()
+                if t and t not in creators:
+                    creators.append(t)
+            author = ", ".join(creators) if creators else None
+
+            # ISBN is not always present. Often stored as dc:identifier with an ISBN-ish value.
+            isbn = None
+            identifiers = []
+            for i in o_root.findall(".//{*}metadata/{*}identifier") + o_root.findall(".//{*}identifier"):
+                t = (i.text or "").strip()
+                if t:
+                    identifiers.append(t)
+            for ident in identifiers:
+                norm = ident.replace("ISBN", "").replace("isbn", "").replace(":", "").strip()
+                digits = "".join(ch for ch in norm if ch.isdigit() or ch in {"X", "x"})
+                if len(digits) in {10, 13}:
+                    isbn = digits.upper()
+                    break
+
+            return (title, author, isbn)
+    except Exception:
+        return (None, None, None)
+
+
+def _derive_title_author_from_filename(file_name: str) -> tuple[str, str]:
+    """Fallback title/author from filename: 'Author - Title.ext'."""
+    stem = Path(file_name).stem
+    parts = [p.strip() for p in stem.split(" - ", 1)]
+    if len(parts) == 2 and parts[0] and parts[1]:
+        return (parts[1], parts[0])
+    return (stem, "")
 
 # --- Cover thumbnail helpers (Phase 1: placeholders, cached on disk) ---
 
@@ -362,20 +449,43 @@ def _init_db(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def _upsert_book(conn: sqlite3.Connection, *, rel_path: str, file_name: str, file_type: str, file_size: int, modified_mtime: int) -> None:
-    # MVP: title/author are left as null. We'll enrich later.
+
+def _upsert_book(
+    conn: sqlite3.Connection,
+    *,
+    rel_path: str,
+    file_name: str,
+    file_type: str,
+    file_size: int,
+    modified_mtime: int,
+    title: str | None = None,
+    author: str | None = None,
+    isbn: str | None = None,
+) -> None:
+    # Best-effort metadata. We only overwrite when we have a non-empty value.
+    title = (title or "").strip() or None
+    author = (author or "").strip() or None
+    isbn = (isbn or "").strip() or None
+
     conn.execute(
         """
-        INSERT INTO books (rel_path, file_name, file_type, file_size, modified_mtime, updated_at)
-        VALUES (?, ?, ?, ?, ?, unixepoch())
+        INSERT INTO books (
+          rel_path, file_name, file_type, file_size, modified_mtime,
+          title, author, isbn,
+          updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, unixepoch())
         ON CONFLICT(rel_path) DO UPDATE SET
           file_name=excluded.file_name,
           file_type=excluded.file_type,
           file_size=excluded.file_size,
           modified_mtime=excluded.modified_mtime,
+          title=COALESCE(excluded.title, books.title),
+          author=COALESCE(excluded.author, books.author),
+          isbn=COALESCE(excluded.isbn, books.isbn),
           updated_at=unixepoch();
         """,
-        (rel_path, file_name, file_type, file_size, modified_mtime),
+        (rel_path, file_name, file_type, file_size, modified_mtime, title, author, isbn),
     )
 
 
@@ -425,14 +535,56 @@ def _index_books(conn: sqlite3.Connection, library_dir: Path | str) -> int:
     # This avoids `cannot start a transaction within a transaction`.
     try:
         with conn:
+            # Track which rel_paths we see during this index run so we can prune stale DB rows
+            # (e.g. when a file is renamed or deleted).
+            conn.execute("CREATE TEMP TABLE IF NOT EXISTS _seen_paths (rel_path TEXT PRIMARY KEY)")
+            conn.execute("DELETE FROM _seen_paths")
             for b in book_dicts:
                 rel_path = str(b["rel_path"])
+                # Record the path as seen for this run
+                conn.execute(
+                    "INSERT OR IGNORE INTO _seen_paths (rel_path) VALUES (?)",
+                    (rel_path,),
+                )
                 file_name = str(b.get("file_name") or Path(rel_path).name)
                 suffix_value = b.get("suffix") or Path(file_name).suffix or Path(rel_path).suffix
                 suffix = str(suffix_value or "").lower()
                 file_type = suffix.lstrip(".") or Path(rel_path).suffix.lower().lstrip(".")
                 file_size = int(b.get("size") or 0)
                 modified_mtime = int(b.get("mtime") or 0)
+
+                # Metadata enrichment (EPUB only for now)
+                title: str | None = None
+                author: str | None = None
+                isbn: str | None = None
+
+                abs_path = b.get("abs_path")
+                # Resolve absolute path for metadata extraction.
+                if abs_path:
+                    try:
+                        abs_p = Path(abs_path)
+                    except Exception:
+                        abs_p = None
+                else:
+                    abs_p = None
+
+                # If we don't have abs_path, reconstruct it from library root + rel_path.
+                if abs_p is None:
+                    try:
+                        abs_p = (root / rel_path).resolve()
+                    except Exception:
+                        abs_p = None
+
+                if abs_p is not None and abs_p.suffix.lower() == ".epub":
+                    title, author, isbn = _epub_metadata(abs_p)
+
+                # Fallback to filename parsing when metadata missing.
+                if not title or not author:
+                    t2, a2 = _derive_title_author_from_filename(file_name)
+                    if not title:
+                        title = t2
+                    if not author and a2:
+                        author = a2
 
                 _upsert_book(
                     conn,
@@ -441,7 +593,18 @@ def _index_books(conn: sqlite3.Connection, library_dir: Path | str) -> int:
                     file_type=file_type,
                     file_size=file_size,
                     modified_mtime=modified_mtime,
+                    title=title,
+                    author=author,
+                    isbn=isbn,
                 )
+            # Remove DB rows for files that no longer exist in the library folder.
+            # This prevents duplicates after renames and clears out deleted books.
+            conn.execute(
+                """
+                DELETE FROM books
+                WHERE rel_path NOT IN (SELECT rel_path FROM _seen_paths)
+                """
+            )
     except Exception:
         # Ensure we never leave the connection in a transaction.
         try:
@@ -460,19 +623,19 @@ def _query_books(conn: sqlite3.Connection, q: str | None) -> tuple[list[dict], i
         like = f"%{q.lower()}%"
         rows = conn.execute(
             """
-            SELECT rel_path, file_name, file_type, file_size, modified_mtime
+            SELECT rel_path, file_name, file_type, file_size, modified_mtime, title
             FROM books
-            WHERE lower(file_name) LIKE ?
-            ORDER BY file_name COLLATE NOCASE ASC
+            WHERE lower(coalesce(title, '')) LIKE ? OR lower(file_name) LIKE ?
+            ORDER BY coalesce(title, file_name) COLLATE NOCASE ASC
             """,
-            (like,),
+            (like, like),
         ).fetchall()
     else:
         rows = conn.execute(
             """
-            SELECT rel_path, file_name, file_type, file_size, modified_mtime
+            SELECT rel_path, file_name, file_type, file_size, modified_mtime, title
             FROM books
-            ORDER BY file_name COLLATE NOCASE ASC
+            ORDER BY coalesce(title, file_name) COLLATE NOCASE ASC
             """
         ).fetchall()
 
@@ -483,7 +646,8 @@ def _query_books(conn: sqlite3.Connection, q: str | None) -> tuple[list[dict], i
         file_name = str(r["file_name"])
         file_type = str(r["file_type"] or "")
         suffix = f".{file_type}" if file_type else Path(file_name).suffix or Path(rel_path).suffix
-        display_name = Path(file_name).stem or file_name
+        title = (r["title"] or "").strip() if "title" in r.keys() else ""
+        display_name = title or (Path(file_name).stem or file_name)
         books.append(
             {
                 "rel_path": rel_path,
@@ -819,6 +983,8 @@ def create_app() -> FastAPI:
             "library.html",
             {
                 "request": request,
+                "app_name": APP_NAME,
+                "logo_url": "/static/Bayleaf_Logo.png",
                 # Primary names
                 "books": books,
                 "total": total,
