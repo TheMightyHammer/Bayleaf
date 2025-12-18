@@ -58,23 +58,50 @@ def _normalise_search_query(q: str | None) -> str:
 
 # --- EPUB metadata helpers (no external deps) ---
 
-def _epub_metadata(epub_path: Path) -> tuple[str | None, str | None, str | None]:
-    """Extract (title, author, isbn) from an EPUB.
+def _epub_metadata(epub_path: Path) -> dict:
+    """Extract common metadata from an EPUB.
 
-    This avoids adding heavy dependencies. Best-effort only.
+    Best-effort only. Returns a dict with keys:
+    title, author, isbn, publisher, published_year, language, description
     """
+
+    def _parse_year(date_str: str | None) -> int | None:
+        if not date_str:
+            return None
+        s = (date_str or "").strip()
+        # Common forms: YYYY, YYYY-MM-DD, 2019-01-01T00:00:00Z
+        digits = "".join(ch for ch in s[:4] if ch.isdigit())
+        if len(digits) == 4:
+            try:
+                y = int(digits)
+                if 1000 <= y <= 3000:
+                    return y
+            except Exception:
+                return None
+        return None
+
+    out = {
+        "title": None,
+        "author": None,
+        "isbn": None,
+        "publisher": None,
+        "published_year": None,
+        "language": None,
+        "description": None,
+    }
+
     try:
         with zipfile.ZipFile(epub_path, "r") as zf:
             # 1) Locate the OPF via META-INF/container.xml
             try:
                 container_xml = zf.read("META-INF/container.xml")
             except KeyError:
-                return (None, None, None)
+                return out
 
             try:
                 c_root = ET.fromstring(container_xml)
             except Exception:
-                return (None, None, None)
+                return out
 
             # Namespaces vary. Use wildcard namespace.
             opf_path = None
@@ -84,40 +111,67 @@ def _epub_metadata(epub_path: Path) -> tuple[str | None, str | None, str | None]
                     opf_path = full_path
                     break
             if not opf_path:
-                return (None, None, None)
+                return out
 
             try:
                 opf_bytes = zf.read(opf_path)
             except KeyError:
-                return (None, None, None)
+                return out
 
             try:
                 o_root = ET.fromstring(opf_bytes)
             except Exception:
-                return (None, None, None)
+                return out
 
-            def _first_text(xpath: str) -> str | None:
-                node = o_root.find(xpath)
-                if node is None:
-                    return None
-                txt = (node.text or "").strip()
-                return txt or None
+            def _first_text(paths: list[str]) -> str | None:
+                for xpath in paths:
+                    node = o_root.find(xpath)
+                    if node is None:
+                        continue
+                    txt = (node.text or "").strip()
+                    if txt:
+                        return txt
+                return None
 
-            # Prefer Dublin Core metadata
-            title = _first_text(".//{*}metadata/{*}title") or _first_text(".//{*}title")
+            # Prefer Dublin Core metadata. Wildcard namespaces handle dc:*
+            title = _first_text([
+                ".//{*}metadata/{*}title",
+                ".//{*}title",
+            ])
 
             # There can be multiple creators. Join distinct values.
-            creators = []
-            for c in o_root.findall(".//{*}metadata/{*}creator") + o_root.findall(".//{*}creator"):
+            creators: list[str] = []
+            for c in (o_root.findall(".//{*}metadata/{*}creator") + o_root.findall(".//{*}creator")):
                 t = (c.text or "").strip()
                 if t and t not in creators:
                     creators.append(t)
             author = ", ".join(creators) if creators else None
 
+            publisher = _first_text([
+                ".//{*}metadata/{*}publisher",
+                ".//{*}publisher",
+            ])
+
+            language = _first_text([
+                ".//{*}metadata/{*}language",
+                ".//{*}language",
+            ])
+
+            description = _first_text([
+                ".//{*}metadata/{*}description",
+                ".//{*}description",
+            ])
+
+            date_str = _first_text([
+                ".//{*}metadata/{*}date",
+                ".//{*}date",
+            ])
+            published_year = _parse_year(date_str)
+
             # ISBN is not always present. Often stored as dc:identifier with an ISBN-ish value.
             isbn = None
-            identifiers = []
-            for i in o_root.findall(".//{*}metadata/{*}identifier") + o_root.findall(".//{*}identifier"):
+            identifiers: list[str] = []
+            for i in (o_root.findall(".//{*}metadata/{*}identifier") + o_root.findall(".//{*}identifier")):
                 t = (i.text or "").strip()
                 if t:
                     identifiers.append(t)
@@ -128,9 +182,17 @@ def _epub_metadata(epub_path: Path) -> tuple[str | None, str | None, str | None]
                     isbn = digits.upper()
                     break
 
-            return (title, author, isbn)
+            out["title"] = title
+            out["author"] = author
+            out["isbn"] = isbn
+            out["publisher"] = publisher
+            out["published_year"] = published_year
+            out["language"] = language
+            out["description"] = description
+
+            return out
     except Exception:
-        return (None, None, None)
+        return out
 
 
 def _derive_title_author_from_filename(file_name: str) -> tuple[str, str]:
@@ -461,20 +523,40 @@ def _upsert_book(
     title: str | None = None,
     author: str | None = None,
     isbn: str | None = None,
+    publisher: str | None = None,
+    published_year: int | None = None,
+    language: str | None = None,
+    description: str | None = None,
 ) -> None:
     # Best-effort metadata. We only overwrite when we have a non-empty value.
     title = (title or "").strip() or None
     author = (author or "").strip() or None
     isbn = (isbn or "").strip() or None
 
+    publisher = (publisher or "").strip() or None
+    language = (language or "").strip() or None
+    description = (description or "").strip() or None
+    # Keep descriptions reasonably sized for MVP (prevents accidental megabytes in DB)
+    if description and len(description) > 20000:
+        description = description[:20000]
+
+    if published_year is not None:
+        try:
+            published_year = int(published_year)
+        except Exception:
+            published_year = None
+        if published_year is not None and not (1000 <= published_year <= 3000):
+            published_year = None
+
     conn.execute(
         """
         INSERT INTO books (
           rel_path, file_name, file_type, file_size, modified_mtime,
           title, author, isbn,
+          publisher, published_year, language, description,
           updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, unixepoch())
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, unixepoch())
         ON CONFLICT(rel_path) DO UPDATE SET
           file_name=excluded.file_name,
           file_type=excluded.file_type,
@@ -483,9 +565,26 @@ def _upsert_book(
           title=COALESCE(excluded.title, books.title),
           author=COALESCE(excluded.author, books.author),
           isbn=COALESCE(excluded.isbn, books.isbn),
+          publisher=COALESCE(excluded.publisher, books.publisher),
+          published_year=COALESCE(excluded.published_year, books.published_year),
+          language=COALESCE(excluded.language, books.language),
+          description=COALESCE(excluded.description, books.description),
           updated_at=unixepoch();
         """,
-        (rel_path, file_name, file_type, file_size, modified_mtime, title, author, isbn),
+        (
+            rel_path,
+            file_name,
+            file_type,
+            file_size,
+            modified_mtime,
+            title,
+            author,
+            isbn,
+            publisher,
+            published_year,
+            language,
+            description,
+        ),
     )
 
 
@@ -557,6 +656,10 @@ def _index_books(conn: sqlite3.Connection, library_dir: Path | str) -> int:
                 title: str | None = None
                 author: str | None = None
                 isbn: str | None = None
+                publisher: str | None = None
+                published_year: int | None = None
+                language: str | None = None
+                description: str | None = None
 
                 abs_path = b.get("abs_path")
                 # Resolve absolute path for metadata extraction.
@@ -576,7 +679,14 @@ def _index_books(conn: sqlite3.Connection, library_dir: Path | str) -> int:
                         abs_p = None
 
                 if abs_p is not None and abs_p.suffix.lower() == ".epub":
-                    title, author, isbn = _epub_metadata(abs_p)
+                    md = _epub_metadata(abs_p)
+                    title = md.get("title")
+                    author = md.get("author")
+                    isbn = md.get("isbn")
+                    publisher = md.get("publisher")
+                    published_year = md.get("published_year")
+                    language = md.get("language")
+                    description = md.get("description")
 
                 # Fallback to filename parsing when metadata missing.
                 if not title or not author:
@@ -596,6 +706,10 @@ def _index_books(conn: sqlite3.Connection, library_dir: Path | str) -> int:
                     title=title,
                     author=author,
                     isbn=isbn,
+                    publisher=publisher,
+                    published_year=published_year,
+                    language=language,
+                    description=description,
                 )
             # Remove DB rows for files that no longer exist in the library folder.
             # This prevents duplicates after renames and clears out deleted books.
@@ -616,26 +730,41 @@ def _index_books(conn: sqlite3.Connection, library_dir: Path | str) -> int:
     return len(book_dicts)
 
 
-def _query_books(conn: sqlite3.Connection, q: str | None) -> tuple[list[dict], int]:
-    q = _normalise_search_query(q)
+def _query_books(conn: sqlite3.Connection, q: str | None, sort: str | None = "title") -> tuple[list[dict], int]:
+    qn = _normalise_search_query(q)
+    sort_key = (sort or "title").strip().lower()
 
-    if q:
-        like = f"%{q.lower()}%"
+    # Sorting options.
+    if sort_key in {"mtime", "modified", "recent"}:
+        order_by = "modified_mtime DESC, file_name COLLATE NOCASE ASC"
+    elif sort_key in {"author"}:
+        order_by = "coalesce(author, '') COLLATE NOCASE ASC, coalesce(title, file_name) COLLATE NOCASE ASC"
+    elif sort_key in {"year", "published", "publication", "published_year"}:
+        # Put unknown years last.
+        order_by = "coalesce(published_year, 9999) ASC, coalesce(title, file_name) COLLATE NOCASE ASC"
+    elif sort_key in {"file", "filename", "name"}:
+        order_by = "file_name COLLATE NOCASE ASC"
+    else:
+        # title
+        order_by = "coalesce(title, file_name) COLLATE NOCASE ASC"
+
+    if qn:
+        like = f"%{qn.lower()}%"
         rows = conn.execute(
-            """
-            SELECT rel_path, file_name, file_type, file_size, modified_mtime, title
+            f"""
+            SELECT rel_path, file_name, file_type, file_size, modified_mtime, title, author, published_year
             FROM books
-            WHERE lower(coalesce(title, '')) LIKE ? OR lower(file_name) LIKE ?
-            ORDER BY coalesce(title, file_name) COLLATE NOCASE ASC
+            WHERE lower(coalesce(title, '')) LIKE ? OR lower(coalesce(author, '')) LIKE ? OR lower(file_name) LIKE ?
+            ORDER BY {order_by}
             """,
-            (like, like),
+            (like, like, like),
         ).fetchall()
     else:
         rows = conn.execute(
-            """
-            SELECT rel_path, file_name, file_type, file_size, modified_mtime, title
+            f"""
+            SELECT rel_path, file_name, file_type, file_size, modified_mtime, title, author, published_year
             FROM books
-            ORDER BY coalesce(title, file_name) COLLATE NOCASE ASC
+            ORDER BY {order_by}
             """
         ).fetchall()
 
@@ -647,6 +776,9 @@ def _query_books(conn: sqlite3.Connection, q: str | None) -> tuple[list[dict], i
         file_type = str(r["file_type"] or "")
         suffix = f".{file_type}" if file_type else Path(file_name).suffix or Path(rel_path).suffix
         title = (r["title"] or "").strip() if "title" in r.keys() else ""
+        author = (r["author"] or "").strip() if "author" in r.keys() else ""
+        published_year = r["published_year"] if "published_year" in r.keys() else None
+        py = int(published_year) if published_year is not None else None
         display_name = title or (Path(file_name).stem or file_name)
         books.append(
             {
@@ -656,6 +788,8 @@ def _query_books(conn: sqlite3.Connection, q: str | None) -> tuple[list[dict], i
                 "suffix": suffix,
                 "size": int(r["file_size"]),
                 "mtime": int(r["modified_mtime"]),
+                "author": author,
+                "published_year": py,
             }
         )
 
@@ -678,6 +812,9 @@ def _query_books_api(conn: sqlite3.Connection, q: str | None, sort: str | None) 
         order_by = "modified_mtime DESC, file_name COLLATE NOCASE ASC"
     elif sort in {"author"}:
         order_by = "coalesce(author, '') COLLATE NOCASE ASC, coalesce(title, file_name) COLLATE NOCASE ASC"
+    elif sort in {"year", "published", "publication", "published_year"}:
+        # Put unknown years last.
+        order_by = "coalesce(published_year, 9999) ASC, coalesce(title, file_name) COLLATE NOCASE ASC"
     elif sort in {"file", "filename", "name"}:
         order_by = "file_name COLLATE NOCASE ASC"
     else:
@@ -688,7 +825,7 @@ def _query_books_api(conn: sqlite3.Connection, q: str | None, sort: str | None) 
         like = f"%{q}%"
         rows = conn.execute(
             f"""
-            SELECT rel_path, file_name, file_type, file_size, modified_mtime, title, author
+            SELECT rel_path, file_name, file_type, file_size, modified_mtime, title, author, published_year
             FROM books
             WHERE
               lower(coalesce(title, '')) LIKE ?
@@ -701,7 +838,7 @@ def _query_books_api(conn: sqlite3.Connection, q: str | None, sort: str | None) 
     else:
         rows = conn.execute(
             f"""
-            SELECT rel_path, file_name, file_type, file_size, modified_mtime, title, author
+            SELECT rel_path, file_name, file_type, file_size, modified_mtime, title, author, published_year
             FROM books
             ORDER BY {order_by}
             """
@@ -717,6 +854,8 @@ def _query_books_api(conn: sqlite3.Connection, q: str | None, sort: str | None) 
         # Prefer DB title if present, otherwise derive from filename.
         title = (r["title"] or "").strip() if "title" in r.keys() else ""
         author = (r["author"] or "").strip() if "author" in r.keys() else ""
+        published_year = r["published_year"] if "published_year" in r.keys() else None
+        py = int(published_year) if published_year is not None else None
 
         if not title:
             # Many files are "Author - Title.ext".
@@ -740,6 +879,7 @@ def _query_books_api(conn: sqlite3.Connection, q: str | None, sort: str | None) 
                 "mtime": int(r["modified_mtime"]),
                 "title": title,
                 "author": author,
+                "published_year": py,
             }
         )
 
@@ -922,7 +1062,7 @@ def create_app() -> FastAPI:
                 pass
 
     @app.get("/", response_class=HTMLResponse, name="home")
-    def home(request: Request, q: str | None = None):
+    def home(request: Request, q: str | None = None, sort: str | None = "title"):
         settings = get_settings()
 
         _ensure_indexed(app)
@@ -936,7 +1076,7 @@ def create_app() -> FastAPI:
 
         conn: sqlite3.Connection = app.state.db
         # Apply server-side filtering only once the query is long enough.
-        books, total = _query_books(conn, q)
+        books, total = _query_books(conn, q, sort=sort)
         _attach_cover_urls(app, books)
 
         if total == 0:
@@ -992,6 +1132,7 @@ def create_app() -> FastAPI:
                 "cookbooks": books,
                 "count": total,
                 "q": (q or "").strip(),
+                "sort": (sort or "title").strip(),
                 "library_dir": str(settings.library_dir),
                 "notice": notice,
             },

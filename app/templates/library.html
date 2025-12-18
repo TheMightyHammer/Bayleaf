@@ -31,17 +31,29 @@
               type="text"
               name="q"
               value="{{ q or '' }}"
-              placeholder="Search titles"
+              placeholder="Search"
               autocomplete="off"
             />
           </div>
-          <div class="grid-size-control" id="gridSizeControl" aria-label="Grid size control">
-            <label for="gridSize">Size</label>
-            <input id="gridSize" type="range" min="220" max="420" step="10" value="300" />
+
+          <div class="selectpill" aria-label="Sort">
+            <select name="sort" id="sort" aria-label="Sort">
+              <option value="title" {% if sort == 'title' %}selected{% endif %}>Title</option>
+              <option value="author" {% if sort == 'author' %}selected{% endif %}>Author</option>
+              <option value="year" {% if sort == 'year' %}selected{% endif %}>Publication year</option>
+            </select>
           </div>
+
+          <button id="reindexBtn" class="reindex-btn" type="button" title="Re-scan the library">
+            Re-scan Library
+          </button>
+          <span id="reindexStatus" class="reindex-status" aria-live="polite"></span>
+
           <button class="pillbtn" type="submit">Search</button>
         </form>
+  
       </div>
+      
 
       {% if notice %}
         <div class="notice">{{ notice }}</div>
@@ -54,7 +66,14 @@
       {% else %}
         <div class="grid">
           {% for book in cookbooks %}
-            <div class="card">
+            <div
+              class="card"
+              data-name="{{ (book.name or '')|e }}"
+              data-author="{{ (book.author or '')|e }}"
+              data-year="{{ (book.published_year or '')|e }}"
+              data-rel-path="{{ (book.rel_path or '')|e }}"
+              data-cover-url="{{ (book.cover_url or '')|e }}"
+            >
               <div class="cover">
                 {% set cover_src = book.cover_url or request.url_for('cover', rel_path=book.rel_path) %}
                 <img
@@ -68,6 +87,10 @@
               </div>
 
               <div class="title" title="{{ book.name }}">{{ book.name }}</div>
+              <div class="book-meta">
+                {% if book.author %}<div class="book-author">{{ book.author }}</div>{% endif %}
+                {% if book.published_year %}<div class="book-year">{{ book.published_year }}</div>{% endif %}
+              </div>
             </div>
           {% endfor %}
         </div>
@@ -78,42 +101,8 @@
       const sortSelect = document.querySelector('select[name="sort"]');
       const grid = document.querySelector('.grid');
 
-      // Grid size slider (CSS should consume --card-size for grid columns)
-      const gridSizeControl = document.getElementById('gridSizeControl');
-      const gridSizeSlider = document.getElementById('gridSize');
-      const rootEl = document.documentElement;
-      const GRID_SIZE_KEY = 'bayleaf_grid_size_px';
-
-      function applyGridSize(px) {
-        rootEl.style.setProperty('--card-size', `${px}px`);
-      }
-
-      function setGridSizeVisible() {
-        // Slider should only show on wider screens. CSS can also enforce this.
-        const show = window.matchMedia('(min-width: 901px)').matches;
-        if (gridSizeControl) gridSizeControl.style.display = show ? 'flex' : 'none';
-      }
-
-      if (gridSizeSlider) {
-        const saved = localStorage.getItem(GRID_SIZE_KEY);
-        if (saved) {
-          gridSizeSlider.value = saved;
-          applyGridSize(saved);
-        } else {
-          applyGridSize(gridSizeSlider.value);
-        }
-
-        gridSizeSlider.addEventListener('input', (e) => {
-          const val = e.target.value;
-          applyGridSize(val);
-          localStorage.setItem(GRID_SIZE_KEY, val);
-        });
-
-        setGridSizeVisible();
-        window.addEventListener('resize', setGridSizeVisible);
-      }
-
-      // If the page rendered with no grid (e.g. empty state), skip live search wiring.
+      // Client-side filter + sort for reviewing the books currently loaded on the page.
+      // This keeps "Search" (form submit) as an explicit action, while typing and sort changes act as filters.
       if (input && grid) {
         function esc(s) {
           return (s || "").replace(/[&<>"']/g, (c) => ({
@@ -125,19 +114,26 @@
           }[c]));
         }
 
-        function pick(obj, keys, fallback = "") {
-          for (const k of keys) {
-            if (obj && obj[k] != null && String(obj[k]).trim() !== "") return obj[k];
-          }
-          return fallback;
+        function norm(s) {
+          return (s || "").toString().toLowerCase();
         }
 
+        // Capture the initial shelf as our source of truth for filtering.
+        const initialCards = Array.from(grid.querySelectorAll('.card'));
+        const allBooks = initialCards.map((el) => ({
+          name: el.dataset.name || el.querySelector('.title')?.textContent?.trim() || "",
+          author: el.dataset.author || "",
+          year: el.dataset.year || "",
+          rel_path: el.dataset.relPath || el.getAttribute('data-rel-path') || "",
+          cover_url: el.dataset.coverUrl || el.getAttribute('data-cover-url') || "",
+        }));
+
         function cardHTML(b) {
-          const relPath = pick(b, ["rel_path", "filename", "path"], "");
-          const name = pick(b, ["name", "title"], relPath);
-          const suffix = pick(b, ["suffix"], "");
-          const coverSrc = pick(b, ["cover_url"], relPath ? `/cover/${encodeURIComponent(relPath)}` : "");
-          const readHref = relPath ? `/read/${encodeURIComponent(relPath)}` : "#";
+          const name = b.name || b.rel_path || "";
+          const author = b.author || "";
+          const year = b.year || "";
+          const relPath = b.rel_path || "";
+          const coverSrc = b.cover_url || (relPath ? `/cover/${encodeURIComponent(relPath)}` : "");
 
           return `
             <div class="card">
@@ -153,44 +149,105 @@
               </div>
 
               <div class="title" title="${esc(name)}">${esc(name)}</div>
+              <div class="book-meta">
+                ${author ? `<div class="book-author">${esc(author)}</div>` : ""}
+                ${year ? `<div class="book-year">${esc(year)}</div>` : ""}
+              </div>
             </div>
           `;
         }
 
-        let t = null;
+        function sortBooks(books, sortKey) {
+          const key = sortKey || 'title';
+          const sorted = [...books];
 
-        async function runSearch() {
-          const q = (input.value || "").trim();
-          const sort = sortSelect ? (sortSelect.value || "title") : "title";
-
-          // Only start filtering once the user has typed 3+ characters.
-          // But if they clear the box, refresh back to the full shelf.
-          if (q.length > 0 && q.length < 3) {
-            return;
+          if (key === 'author') {
+            sorted.sort((a, b) => norm(a.author || a.name).localeCompare(norm(b.author || b.name)));
+            return sorted;
           }
 
-          const res = await fetch(`/api/cookbooks?q=${encodeURIComponent(q)}&sort=${encodeURIComponent(sort)}`);
-          if (!res.ok) return;
+          if (key === 'year') {
+            // Newest first. Missing years go to the end.
+            const ay = (x) => {
+              const n = parseInt(x.year, 10);
+              return Number.isFinite(n) ? n : -Infinity;
+            };
+            sorted.sort((a, b) => ay(b) - ay(a) || norm(a.name).localeCompare(norm(b.name)));
+            return sorted;
+          }
 
-          const payload = await res.json();
-          const books = Array.isArray(payload) ? payload : (payload.items || payload.books || []);
+          // Default: title
+          sorted.sort((a, b) => norm(a.name).localeCompare(norm(b.name)));
+          return sorted;
+        }
 
+        function filterBooks(books, qRaw) {
+          const q = (qRaw || '').trim();
+          if (q.length < 3) return books;
+          const nq = norm(q);
+          return books.filter((b) => {
+            const hay = `${norm(b.name)} ${norm(b.author)} ${norm(b.year)}`;
+            return hay.includes(nq);
+          });
+        }
+
+        function render(books) {
           if (!books.length) {
             grid.innerHTML = `<div class="empty">No matches.</div>`;
             return;
           }
-
-          grid.innerHTML = books.map(cardHTML).join("");
+          grid.innerHTML = books.map(cardHTML).join('');
         }
 
-        function scheduleSearch() {
+        function apply() {
+          const sort = sortSelect ? (sortSelect.value || 'title') : 'title';
+          const qRaw = input.value || '';
+          const filtered = filterBooks(allBooks, qRaw);
+          const sorted = sortBooks(filtered, sort);
+          render(sorted);
+        }
+
+        let t = null;
+        function scheduleApply() {
           clearTimeout(t);
-          t = setTimeout(runSearch, 180);
+          t = setTimeout(apply, 120);
         }
 
-        input.addEventListener("input", scheduleSearch);
-        if (sortSelect) sortSelect.addEventListener("change", runSearch);
+        input.addEventListener('input', scheduleApply);
+        if (sortSelect) sortSelect.addEventListener('change', apply);
+
+        // Ensure initial render respects current sort even with empty query.
+        apply();
       }
+
+      const reindexBtn = document.getElementById("reindexBtn");
+      const reindexStatus = document.getElementById("reindexStatus");
+
+      async function runReindex() {
+        try {
+          reindexBtn.disabled = true;
+          reindexStatus.textContent = "Reindexing…";
+
+          const res = await fetch("/admin/reindex", { method: "POST" });
+          if (!res.ok) {
+            const txt = await res.text();
+            throw new Error(txt || `HTTP ${res.status}`);
+          }
+
+          const data = await res.json();
+          reindexStatus.textContent = `Indexed ${data.indexed ?? "?"} books. Refreshing…`;
+
+          // Reload the page so the server-rendered shelf matches DB state
+          window.location.reload();
+        } catch (err) {
+          reindexStatus.textContent = "Reindex failed. Check logs.";
+          console.error(err);
+        } finally {
+          reindexBtn.disabled = false;
+        }
+      }
+
+      reindexBtn?.addEventListener("click", runReindex);
     </script>
   </body>
 </html>
