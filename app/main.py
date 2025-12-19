@@ -12,8 +12,9 @@ from pathlib import Path
 import zipfile
 import xml.etree.ElementTree as ET
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Query
 from fastapi.responses import HTMLResponse, JSONResponse
+from pydantic import BaseModel
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.responses import FileResponse
@@ -24,6 +25,8 @@ except Exception:  # Pillow is optional in dev
     Image = ImageDraw = ImageFont = None  # type: ignore
 
 import logging
+
+from urllib.parse import quote
 
 logger = logging.getLogger("bayleaf")
 
@@ -37,6 +40,9 @@ APP_NAME = "Bayleaf"
 
 # Minimum characters before we apply a text filter (helps live-search UX)
 DEFAULT_MIN_SEARCH_CHARS = 3
+
+class ProgressIn(BaseModel):
+    cfi: str
 
 def _min_search_chars() -> int:
     try:
@@ -475,6 +481,13 @@ def _init_db(conn: sqlite3.Connection) -> None:
           indexed_recipes INTEGER NOT NULL DEFAULT 0,
           errors TEXT
         );
+
+        -- Reading progress (EPUB location saved as CFI). One row per book for MVP.
+        CREATE TABLE IF NOT EXISTS reading_progress (
+          rel_path TEXT PRIMARY KEY,
+          cfi TEXT NOT NULL,
+          updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+        );
         """
     )
 
@@ -886,6 +899,40 @@ def _query_books_api(conn: sqlite3.Connection, q: str | None, sort: str | None) 
     return out
 
 
+# --- Reading progress helpers (EPUB CFI persistence) ---
+
+def _get_progress_cfi(conn: sqlite3.Connection, rel_path: str) -> str | None:
+    try:
+        row = conn.execute(
+            "SELECT cfi FROM reading_progress WHERE rel_path = ?",
+            (rel_path,),
+        ).fetchone()
+        if row is None:
+            return None
+        cfi = row[0]
+        return str(cfi) if cfi else None
+    except Exception:
+        return None
+
+
+def _set_progress_cfi(conn: sqlite3.Connection, rel_path: str, cfi: str) -> None:
+    rel_path = (rel_path or "").strip()
+    cfi = (cfi or "").strip()
+    if not rel_path or not cfi:
+        return
+    conn.execute(
+        """
+        INSERT INTO reading_progress (rel_path, cfi, updated_at)
+        VALUES (?, ?, unixepoch())
+        ON CONFLICT(rel_path) DO UPDATE SET
+          cfi=excluded.cfi,
+          updated_at=unixepoch();
+        """,
+        (rel_path, cfi),
+    )
+    conn.commit()
+
+
 def _safe_resolve(root: Path, rel_path: str) -> Path:
     root_resolved = root.resolve()
     candidate = (root_resolved / rel_path).resolve()
@@ -978,6 +1025,27 @@ def create_app() -> FastAPI:
             "count": len(books),
             "books": books,
         }
+
+
+    @app.get("/api/progress/{rel_path:path}", response_class=JSONResponse, name="api_get_progress")
+    def api_get_progress(rel_path: str) -> dict:
+        """Return last saved reading location for a book.
+
+        For EPUBs we store the location as an EPUB CFI string.
+        """
+        _ensure_indexed(app)
+        conn: sqlite3.Connection = app.state.db
+        cfi = _get_progress_cfi(conn, rel_path)
+        return {"rel_path": rel_path, "cfi": cfi}
+
+
+    @app.put("/api/progress/{rel_path:path}", response_class=JSONResponse, name="api_put_progress")
+    def api_put_progress(rel_path: str, payload: ProgressIn) -> dict:
+        """Save reading location for a book."""
+        _ensure_indexed(app)
+        conn: sqlite3.Connection = app.state.db
+        _set_progress_cfi(conn, rel_path, payload.cfi)
+        return {"ok": True}
 
     @app.on_event("startup")
     def _startup() -> None:
@@ -1138,16 +1206,41 @@ def create_app() -> FastAPI:
             },
         )
 
+    @app.get("/read", response_class=HTMLResponse, name="read_book_query")
+    def read_book_query(request: Request, path: str = Query(..., alias="path")):
+        # Delegate to the path-based handler for shared logic.
+        return read_book(request, path)
+
     @app.get("/read/{rel_path:path}", response_class=HTMLResponse, name="read_book")
     def read_book(request: Request, rel_path: str):
         settings = get_settings()
         file_path = _safe_resolve(settings.library_dir, rel_path)
         title = file_path.stem
         file_type = file_path.suffix.lower().lstrip(".")
+
+        # Prefer relative URLs for reverse-proxy friendliness.
+        file_url = f"/book?path={quote(rel_path)}"
+        progress_url = str(app.url_path_for("api_get_progress", rel_path=rel_path))
+        progress_put_url = str(app.url_path_for("api_put_progress", rel_path=rel_path))
+
         return templates.TemplateResponse(
             "read.html",
-            {"request": request, "title": title, "rel_path": rel_path, "file_type": file_type},
+            {
+                "request": request,
+                "title": title,
+                "rel_path": rel_path,
+                "file_type": file_type,
+                "file_url": file_url,
+                "progress_url": progress_url,
+                "progress_put_url": progress_put_url,
+            },
         )
+
+    @app.get("/book", name="book")
+    def book(path: str = Query(..., alias="path")):
+        # Stream an EPUB/PDF using a query parameter. This avoids path-routing edge cases
+        # with spaces, commas, and other characters.
+        return file(path)
 
     @app.get("/file/{rel_path:path}", name="file")
     def file(rel_path: str):

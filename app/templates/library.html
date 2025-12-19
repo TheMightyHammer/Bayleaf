@@ -66,32 +66,40 @@
       {% else %}
         <div class="grid">
           {% for book in cookbooks %}
-            <div
-              class="card"
-              data-name="{{ (book.name or '')|e }}"
-              data-author="{{ (book.author or '')|e }}"
-              data-year="{{ (book.published_year or '')|e }}"
-              data-rel-path="{{ (book.rel_path or '')|e }}"
-              data-cover-url="{{ (book.cover_url or '')|e }}"
+            <a
+              class="card-link"
+              href="/read?path={{ book.rel_path|urlencode }}"
+              target="_blank"
+              rel="noopener"
+              title="Open reader"
             >
-              <div class="cover">
-                {% set cover_src = book.cover_url or request.url_for('cover', rel_path=book.rel_path) %}
-                <img
-                  src="{{ cover_src }}"
-                  alt="Cover for {{ book.name }}"
-                  loading="lazy"
-                  class="cover-img"
-                  onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';"
-                />
-                <div class="placeholder" style="display:none;">No cover yet</div>
-              </div>
+              <div
+                class="card"
+                data-name="{{ (book.name or '')|e }}"
+                data-author="{{ (book.author or '')|e }}"
+                data-year="{{ (book.published_year or '')|e }}"
+                data-rel-path="{{ (book.rel_path or '')|e }}"
+                data-cover-url="{{ (book.cover_url or '')|e }}"
+              >
+                <div class="cover">
+                  {% set cover_src = book.cover_url or request.url_for('cover', rel_path=book.rel_path) %}
+                  <img
+                    src="{{ cover_src }}"
+                    alt="Cover for {{ book.name }}"
+                    loading="lazy"
+                    class="cover-img"
+                    onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';"
+                  />
+                  <div class="placeholder" style="display:none;">No cover yet</div>
+                </div>
 
-              <div class="title" title="{{ book.name }}">{{ book.name }}</div>
-              <div class="book-meta">
-                {% if book.author %}<div class="book-author">{{ book.author }}</div>{% endif %}
-                {% if book.published_year %}<div class="book-year">{{ book.published_year }}</div>{% endif %}
+                <div class="title" title="{{ book.name }}">{{ book.name }}</div>
+                <div class="book-meta">
+                  {% if book.author %}<div class="book-author">{{ book.author }}</div>{% endif %}
+                  {% if book.published_year %}<div class="book-year">{{ book.published_year }}</div>{% endif %}
+                </div>
               </div>
-            </div>
+            </a>
           {% endfor %}
         </div>
       {% endif %}
@@ -124,8 +132,8 @@
           name: el.dataset.name || el.querySelector('.title')?.textContent?.trim() || "",
           author: el.dataset.author || "",
           year: el.dataset.year || "",
-          rel_path: el.dataset.relPath || el.getAttribute('data-rel-path') || "",
-          cover_url: el.dataset.coverUrl || el.getAttribute('data-cover-url') || "",
+          rel_path: el.dataset.relPath || "",
+          cover_url: el.dataset.coverUrl || "",
         }));
 
         function cardHTML(b) {
@@ -133,27 +141,31 @@
           const author = b.author || "";
           const year = b.year || "";
           const relPath = b.rel_path || "";
-          const coverSrc = b.cover_url || (relPath ? `/cover/${encodeURIComponent(relPath)}` : "");
+          // Use encodeURI so path separators remain intact if relPath contains subfolders.
+          const coverSrc = b.cover_url || (relPath ? `/cover/${encodeURI(relPath)}` : "");
+          const readerHref = relPath ? `/read?path=${encodeURIComponent(relPath)}` : "#";
 
           return `
-            <div class="card">
-              <div class="cover">
-                <img
-                  src="${coverSrc}"
-                  alt="Cover for ${esc(name)}"
-                  loading="lazy"
-                  class="cover-img"
-                  onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';"
-                />
-                <div class="placeholder" style="display:none;">No cover yet</div>
-              </div>
+            <a class="card-link" href="${readerHref}" target="_blank" rel="noopener" title="Open reader">
+              <div class="card">
+                <div class="cover">
+                  <img
+                    src="${coverSrc}"
+                    alt="Cover for ${esc(name)}"
+                    loading="lazy"
+                    class="cover-img"
+                    onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';"
+                  />
+                  <div class="placeholder" style="display:none;">No cover yet</div>
+                </div>
 
-              <div class="title" title="${esc(name)}">${esc(name)}</div>
-              <div class="book-meta">
-                ${author ? `<div class="book-author">${esc(author)}</div>` : ""}
-                ${year ? `<div class="book-year">${esc(year)}</div>` : ""}
+                <div class="title" title="${esc(name)}">${esc(name)}</div>
+                <div class="book-meta">
+                  ${author ? `<div class="book-author">${esc(author)}</div>` : ""}
+                  ${year ? `<div class="book-year">${esc(year)}</div>` : ""}
+                </div>
               </div>
-            </div>
+            </a>
           `;
         }
 

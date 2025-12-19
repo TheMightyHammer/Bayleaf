@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{{ title }} · Bayleaf</title>
     <link rel="stylesheet" href="{{ request.url_for('static', path='app.css') }}" />
+    <meta name="referrer" content="no-referrer" />
   </head>
   <body>
     <div class="container">
@@ -24,9 +25,86 @@
           <embed src="{{ request.url_for('file', rel_path=rel_path) }}" type="application/pdf" />
         </div>
       {% else %}
-        <div class="notice">
-          EPUB embedded reading is coming next. For now, use Download.
+        <!-- EPUB reader -->
+        <div class="reader" id="epub-reader">
+          <div id="epub-viewer" style="width: 100%; height: calc(100vh - 170px);"></div>
+          <div class="notice" id="epub-fallback" style="display:none; margin-top: 12px;">
+            EPUB reader failed to load. Please use Download.
+          </div>
         </div>
+
+        <!-- Controls -->
+        <div class="pillbar" style="justify-content: center; gap: 10px; margin-top: 12px;">
+          <button class="btn" type="button" id="prev">←</button>
+          <button class="btn" type="button" id="next">→</button>
+        </div>
+
+        <!-- epub.js library (you added epub.min.js into /static) -->
+        <script src="{{ request.url_for('static', path='epub.min.js') }}"></script>
+
+        <!-- Minimal reader logic. Later we can move this into /static/reader.js -->
+        <script>
+          (function () {
+            const relPath = {{ rel_path | tojson }};
+            const fileUrl = {{ request.url_for('file', rel_path=rel_path) | tojson }};
+
+            const viewer = document.getElementById('epub-viewer');
+            const fallback = document.getElementById('epub-fallback');
+            const prevBtn = document.getElementById('prev');
+            const nextBtn = document.getElementById('next');
+
+            // If epub.js didn't load, show a friendly fallback.
+            if (!window.ePub) {
+              fallback.style.display = 'block';
+              return;
+            }
+
+            const progressKey = `bayleaf:epub:cfi:${relPath}`;
+
+            try {
+              const book = window.ePub(fileUrl);
+              const rendition = book.renderTo(viewer, {
+                width: '100%',
+                height: '100%',
+                flow: 'paginated',
+                spread: 'auto'
+              });
+
+              // Restore last location (CFI) if we have one, otherwise start at the beginning.
+              const lastCfi = localStorage.getItem(progressKey);
+              rendition.display(lastCfi || undefined);
+
+              // Save reading position on every relocation.
+              rendition.on('relocated', function (location) {
+                if (location && location.start && location.start.cfi) {
+                  localStorage.setItem(progressKey, location.start.cfi);
+                }
+              });
+
+              // Wire buttons
+              prevBtn.addEventListener('click', function () {
+                rendition.prev();
+              });
+              nextBtn.addEventListener('click', function () {
+                rendition.next();
+              });
+
+              // Keyboard support
+              document.addEventListener('keydown', function (e) {
+                if (e.key === 'ArrowLeft') rendition.prev();
+                if (e.key === 'ArrowRight') rendition.next();
+              });
+
+              // Basic error handling
+              book.on('openFailed', function () {
+                fallback.style.display = 'block';
+              });
+            } catch (err) {
+              console.error(err);
+              fallback.style.display = 'block';
+            }
+          })();
+        </script>
       {% endif %}
     </div>
   </body>
