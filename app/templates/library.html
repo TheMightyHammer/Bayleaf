@@ -49,6 +49,7 @@
           </button>
           <span id="reindexStatus" class="reindex-status" aria-live="polite"></span>
 
+          <a class="pillbtn" href="{{ request.url_for('recipes') }}">Recipes</a>
           <button class="pillbtn" type="submit">Search</button>
         </form>
   
@@ -243,7 +244,15 @@
           }
 
           const data = await res.json();
-          reindexStatus.textContent = `Indexed ${data.indexed ?? "?"} books. Refreshing…`;
+          const books = data.indexed_books ?? "?";
+          const recipes = data.indexed_recipes ?? "?";
+          if (data.error) {
+            const dir = data.library_dir || "unknown";
+            reindexStatus.textContent = `${data.error}. Library dir: ${dir}`;
+          } else {
+            const epubs = data.epub_count ?? "?";
+            reindexStatus.textContent = `Indexed ${books} books and ${recipes} recipes. EPUBs: ${epubs}. Refreshing…`;
+          }
 
           // Reload the page so the server-rendered shelf matches DB state
           window.location.reload();

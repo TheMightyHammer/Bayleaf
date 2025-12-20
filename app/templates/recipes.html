@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Recipes · Bayleaf</title>
+    <link rel="stylesheet" href="{{ request.url_for('static', path='app.css') }}" />
+    <link rel="icon" href="{{ request.url_for('static', path='favicon.ico') }}">
+    <meta name="theme-color" content="#5F7A6A" />
+  </head>
+  <body>
+    <div class="container">
+      <div class="topbar">
+        <div class="brandline">
+          <div class="brand">
+            <img
+              src="{{ request.url_for('static', path='Bayleaf_Logo.png') }}"
+              alt="Bayleaf logo"
+              class="brand-logo"
+            />
+            <h1>Recipes</h1>
+          </div>
+          <div class="meta">
+            {% if total %}{{ total }} recipe{% if total != 1 %}s{% endif %}{% else %}No recipes yet{% endif %}
+          </div>
+        </div>
+
+        <form class="searchrow" method="get" action="{{ request.url_for('recipes') }}">
+          <div class="searchpill">
+            <input
+              type="text"
+              name="q"
+              value="{{ q or '' }}"
+              placeholder="Search recipes"
+              autocomplete="off"
+            />
+          </div>
+          <a class="pillbtn" href="{{ request.url_for('home') }}">Library</a>
+          <button class="pillbtn" type="submit">Search</button>
+        </form>
+      </div>
+
+      {% if not recipes %}
+        <div class="empty">
+          No recipes found yet. Try indexing books or searching with a different term.
+        </div>
+      {% else %}
+        <div class="grid">
+          {% for recipe in recipes %}
+            <a
+              class="card-link"
+              href="/read?path={{ recipe.rel_path|urlencode }}&loc={{ recipe.location_value|urlencode }}"
+              target="_blank"
+              rel="noopener"
+              title="Read recipe in book"
+            >
+              <div class="card recipe-card">
+                <div class="cover">
+                  {% set cover_src = recipe.image_url or recipe.cover_url or request.url_for('cover', rel_path=recipe.rel_path) %}
+                  {% set fallback_src = recipe.cover_url or request.url_for('cover', rel_path=recipe.rel_path) %}
+                  <img
+                    src="{{ cover_src }}"
+                    data-fallback="{{ fallback_src }}"
+                    alt="Cover for {{ recipe.title }}"
+                    loading="lazy"
+                    class="cover-img"
+                    onerror="if (this.dataset.fallback && this.src !== this.dataset.fallback) { this.src = this.dataset.fallback; } else { this.style.display='none'; this.nextElementSibling.style.display='flex'; }"
+                  />
+                  <div class="placeholder" style="display:none;">No cover yet</div>
+                </div>
+                <div class="recipe-info">
+                  <div class="title" title="{{ recipe.title }}">{{ recipe.title }}</div>
+                  <div class="book-meta">
+                    <div class="book-author">{{ recipe.book_title }}</div>
+                  </div>
+                </div>
+                <div class="card-cta">
+                  <button class="btn read-btn" type="button">Read recipe</button>
+                </div>
+              </div>
+            </a>
+          {% endfor %}
+        </div>
+      {% endif %}
+    </div>
+  </body>
+</html>

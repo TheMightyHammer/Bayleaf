@@ -37,11 +37,20 @@ def get_library_dir() -> str:
     return get_env("BAYLEAF_LIBRARY_DIR", "/cookbooks")
 
 
+def get_int_env(name: str, default: int) -> int:
+    raw = get_env(name, str(default))
+    try:
+        return int(raw)
+    except Exception:
+        return default
+
+
 @dataclass(frozen=True)
 class Settings:
     library_dir: Path
     env: str = "dev"
     db_path: Path | None = None
+    recipe_index_limit: int = 0
 
 
 @lru_cache(maxsize=1)
@@ -49,4 +58,10 @@ def get_settings() -> Settings:
     library_dir = Path(get_library_dir()).expanduser()
     env = get_env("BAYLEAF_ENV", "dev") or "dev"
     db_path = Path(get_db_path()).expanduser()
-    return Settings(library_dir=library_dir, env=env, db_path=db_path)
+    recipe_index_limit = get_int_env("BAYLEAF_RECIPE_INDEX_LIMIT", 0)
+    return Settings(
+        library_dir=library_dir,
+        env=env,
+        db_path=db_path,
+        recipe_index_limit=recipe_index_limit,
+    )

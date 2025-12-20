@@ -253,6 +253,7 @@
 
     const storageKey = `bayleaf:reader:loc:${stableKey(bookUrl)}`;
     const savedCfi = localStorage.getItem(storageKey) || '';
+    const recipeLoc = getParam('loc') || '';
 
     setStatus('Loading book…');
 
@@ -320,7 +321,9 @@
     bindControls(rendition);
 
     try {
-      if (savedCfi) {
+      if (recipeLoc) {
+        await rendition.display(recipeLoc);
+      } else if (savedCfi) {
         await rendition.display(savedCfi);
       } else {
         await rendition.display();

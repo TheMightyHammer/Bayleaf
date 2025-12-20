@@ -13,7 +13,7 @@ import zipfile
 import xml.etree.ElementTree as ET
 
 from fastapi import FastAPI, HTTPException, Request, Query
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -27,11 +27,13 @@ except Exception:  # Pillow is optional in dev
 import logging
 
 from urllib.parse import quote
+from urllib.parse import unquote
 
 logger = logging.getLogger("bayleaf")
 
 from app.config import get_env, get_settings
 from app.library import ALLOWED_SUFFIXES, list_cookbooks
+from app.recipes import extract_epub_recipes
 
 
 
@@ -435,6 +437,7 @@ def _init_db(conn: sqlite3.Connection) -> None:
 
           location_type TEXT,
           location_value TEXT,
+          image_href TEXT,
 
           created_at INTEGER NOT NULL DEFAULT (unixepoch()),
           updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
@@ -491,6 +494,8 @@ def _init_db(conn: sqlite3.Connection) -> None:
         """
     )
 
+    _ensure_recipes_columns(conn)
+
     # Full text search for recipes. Uses FTS5. This is built into modern SQLite.
     conn.executescript(
         """
@@ -522,6 +527,15 @@ def _init_db(conn: sqlite3.Connection) -> None:
     )
 
     conn.commit()
+
+
+def _ensure_recipes_columns(conn: sqlite3.Connection) -> None:
+    existing = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(recipes)").fetchall()
+    }
+    if "image_href" not in existing:
+        conn.execute("ALTER TABLE recipes ADD COLUMN image_href TEXT")
 
 
 
@@ -601,7 +615,152 @@ def _upsert_book(
     )
 
 
-def _index_books(conn: sqlite3.Connection, library_dir: Path | str) -> int:
+def _book_id_for_rel_path(conn: sqlite3.Connection, rel_path: str) -> int | None:
+    row = conn.execute("SELECT id FROM books WHERE rel_path = ?", (rel_path,)).fetchone()
+    if row is None:
+        return None
+    return int(row["id"])
+
+
+def _count_recipes_for_book(conn: sqlite3.Connection, book_id: int) -> int:
+    row = conn.execute(
+        "SELECT COUNT(*) AS c FROM recipes WHERE book_id = ?",
+        (book_id,),
+    ).fetchone()
+    return int(row["c"] or 0) if row is not None else 0
+
+
+def _count_recipes_for_book_source(
+    conn: sqlite3.Connection, book_id: int, source_type: str
+) -> int:
+    row = conn.execute(
+        "SELECT COUNT(*) AS c FROM recipes WHERE book_id = ? AND source_type = ?",
+        (book_id, source_type),
+    ).fetchone()
+    return int(row["c"] or 0) if row is not None else 0
+
+
+def _truncate_text(value: str | None, limit: int) -> str | None:
+    if not value:
+        return None
+    if len(value) <= limit:
+        return value
+    return value[:limit]
+
+
+def _upsert_recipe(conn: sqlite3.Connection, book_id: int, recipe: dict) -> None:
+    title = (recipe.get("title") or "").strip()
+    if not title:
+        return
+
+    ingredients_text = _truncate_text(recipe.get("ingredients_text"), 20000)
+    method_text = _truncate_text(recipe.get("method_text"), 50000)
+    source_type = recipe.get("source_type") or "epub"
+    source_key = recipe.get("source_key") or ""
+    location_type = recipe.get("location_type")
+    location_value = recipe.get("location_value")
+    image_href = recipe.get("image_href")
+
+    if not source_key or not method_text:
+        return
+
+    conn.execute(
+        """
+        INSERT INTO recipes (
+          book_id,
+          title,
+          ingredients_text,
+          method_text,
+          source_type,
+          source_key,
+          location_type,
+          location_value,
+          image_href
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(book_id, source_type, source_key) DO UPDATE SET
+          title=excluded.title,
+          ingredients_text=excluded.ingredients_text,
+          method_text=excluded.method_text,
+          location_type=excluded.location_type,
+          location_value=excluded.location_value,
+          image_href=excluded.image_href,
+          updated_at=unixepoch()
+        """,
+        (
+            book_id,
+            title,
+            ingredients_text,
+            method_text,
+            source_type,
+            source_key,
+            location_type,
+            location_value,
+            image_href,
+        ),
+    )
+
+
+def _index_recipes(
+    conn: sqlite3.Connection,
+    library_dir: Path,
+    book_dicts: list[dict],
+    recipe_book_limit: int,
+) -> int:
+    root = Path(library_dir)
+    candidates = []
+    for b in book_dicts:
+        rel_path = str(b.get("rel_path") or "")
+        suffix_value = b.get("suffix") or Path(rel_path).suffix
+        suffix = str(suffix_value or "").lower()
+        if suffix != ".epub":
+            continue
+        candidates.append(b)
+
+    extracted = 0
+    limit = None if recipe_book_limit <= 0 else recipe_book_limit
+    for b in candidates[:limit]:
+        rel_path = str(b.get("rel_path") or "")
+        if not rel_path:
+            continue
+        book_id = _book_id_for_rel_path(conn, rel_path)
+        if book_id is None:
+            continue
+
+        abs_path = b.get("abs_path")
+        if abs_path:
+            epub_path = Path(abs_path)
+        else:
+            epub_path = (root / rel_path).resolve()
+
+        is_crumbs = "crumbs" in epub_path.name.lower() and "doilies" in epub_path.name.lower()
+        if is_crumbs:
+            if _count_recipes_for_book_source(conn, book_id, "epub:crumbs_doilies") > 0:
+                continue
+            conn.execute("DELETE FROM recipes WHERE book_id = ?", (book_id,))
+        else:
+            if _count_recipes_for_book(conn, book_id) > 0:
+                continue
+
+        try:
+            recipes = extract_epub_recipes(epub_path, max_recipes=200)
+        except Exception as exc:
+            logger.warning("Recipe extraction failed for %s: %s", rel_path, exc)
+            continue
+
+        if not recipes:
+            continue
+
+        with conn:
+            for recipe in recipes:
+                _upsert_recipe(conn, book_id, recipe)
+
+        extracted += len(recipes)
+
+    return extracted
+
+
+def _index_books(conn: sqlite3.Connection, library_dir: Path | str) -> tuple[int, int]:
     """Scan the library folder and sync the books table.
 
     This is intentionally "best effort". If a book fails to index, the app should still run.
@@ -610,7 +769,7 @@ def _index_books(conn: sqlite3.Connection, library_dir: Path | str) -> int:
     if isinstance(library_dir, str):
         library_dir = Path(library_dir)
     if not library_dir.exists():
-        return 0
+        return 0, 0
 
     books = list_cookbooks(library_dir)
     book_dicts = [_cookbook_to_dict(b) for b in books]
@@ -740,7 +899,16 @@ def _index_books(conn: sqlite3.Connection, library_dir: Path | str) -> int:
             pass
         raise
 
-    return len(book_dicts)
+    recipes_indexed = 0
+    try:
+        settings = get_settings()
+        recipes_indexed = _index_recipes(
+            conn, root, book_dicts, settings.recipe_index_limit
+        )
+    except Exception as exc:
+        logger.warning("Recipe indexing skipped: %s", exc)
+
+    return len(book_dicts), recipes_indexed
 
 
 def _query_books(conn: sqlite3.Connection, q: str | None, sort: str | None = "title") -> tuple[list[dict], int]:
@@ -808,6 +976,58 @@ def _query_books(conn: sqlite3.Connection, q: str | None, sort: str | None = "ti
 
     total = conn.execute("SELECT COUNT(*) AS c FROM books").fetchone()["c"]
     return books, int(total)
+
+
+def _query_recipes(conn: sqlite3.Connection, q: str | None) -> tuple[list[dict], int]:
+    qn = _normalise_search_query(q)
+
+    base_select = """
+        SELECT
+          r.id,
+          r.title,
+          r.ingredients_text,
+          r.method_text,
+          r.location_value,
+          r.image_href,
+          b.rel_path,
+          coalesce(b.title, b.file_name) AS book_title
+        FROM recipes r
+        JOIN books b ON b.id = r.book_id
+    """
+
+    if qn:
+        rows = conn.execute(
+            base_select
+            + """
+            WHERE r.id IN (
+              SELECT rowid FROM recipes_fts WHERE recipes_fts MATCH ?
+            )
+            ORDER BY r.title COLLATE NOCASE ASC
+            """,
+            (qn,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            base_select + " ORDER BY r.title COLLATE NOCASE ASC"
+        ).fetchall()
+
+    recipes: list[dict] = []
+    for row in rows:
+        recipes.append(
+            {
+                "id": row["id"],
+                "title": row["title"],
+                "ingredients_text": row["ingredients_text"],
+                "method_text": row["method_text"],
+                "location_value": row["location_value"],
+                "image_href": row["image_href"],
+                "rel_path": row["rel_path"],
+                "book_title": row["book_title"],
+            }
+        )
+
+    total = len(recipes)
+    return recipes, total
 
 
 # --- API query helper for live-search ---
@@ -981,13 +1201,18 @@ def _ensure_indexed(app: FastAPI) -> None:
         index_conn = _connect_db()
         try:
             _init_db(index_conn)
-            indexed = _index_books(index_conn, settings.library_dir)
+            indexed_books, indexed_recipes = _index_books(index_conn, settings.library_dir)
         finally:
             try:
                 index_conn.close()
             except Exception:
                 pass
-        logger.info("Indexed %s books into DB at %s", indexed, _db_path())
+        logger.info(
+            "Indexed %s books (%s recipes) into DB at %s",
+            indexed_books,
+            indexed_recipes,
+            _db_path(),
+        )
     except Exception as exc:
         # Do not crash the app. Record the error so we can surface it.
         logger.exception("Indexing failed: %s", exc)
@@ -1060,13 +1285,17 @@ def create_app() -> FastAPI:
             startup_conn = _connect_db()
             try:
                 _init_db(startup_conn)
-                indexed = _index_books(startup_conn, settings.library_dir)
+                indexed_books, indexed_recipes = _index_books(startup_conn, settings.library_dir)
             finally:
                 try:
                     startup_conn.close()
                 except Exception:
                     pass
-            logger.info("Startup indexing complete. indexed_books=%s", indexed)
+            logger.info(
+                "Startup indexing complete. indexed_books=%s indexed_recipes=%s",
+                indexed_books,
+                indexed_recipes,
+            )
         except Exception as exc:
             logger.exception("Startup indexing failed: %s", exc)
             app.state.last_index_error = str(exc)
@@ -1099,12 +1328,22 @@ def create_app() -> FastAPI:
 
         settings = get_settings()
 
+        library_dir = settings.library_dir
+        if not library_dir.exists():
+            return {
+                "indexed_books": 0,
+                "indexed_recipes": 0,
+                "library_dir": str(library_dir),
+                "error": "Library directory not found",
+                "epub_count": 0,
+            }
+
         # Use a fresh connection for reindexing so we never collide with the shared
         # connection's transaction state (health checks, concurrent requests, etc.).
         conn = _connect_db()
         try:
             _init_db(conn)
-            indexed = _index_books(conn, settings.library_dir)
+            indexed_books, indexed_recipes = _index_books(conn, settings.library_dir)
 
             # Refresh the long-lived connection so subsequent requests (health/home)
             # see the newly committed data immediately.
@@ -1119,7 +1358,17 @@ def create_app() -> FastAPI:
             _init_db(fresh)
             app.state.db = fresh
 
-            return {"indexed": indexed}
+            epub_count = sum(
+                1
+                for b in list_cookbooks(library_dir)
+                if str(getattr(b, "suffix", "")).lower() == ".epub"
+            )
+            return {
+                "indexed_books": indexed_books,
+                "indexed_recipes": indexed_recipes,
+                "library_dir": str(settings.library_dir),
+                "epub_count": epub_count,
+            }
         except Exception as exc:
             logger.exception("Admin reindex failed: %s", exc)
             raise HTTPException(status_code=500, detail=str(exc))
@@ -1236,11 +1485,68 @@ def create_app() -> FastAPI:
             },
         )
 
+    @app.get("/recipes", response_class=HTMLResponse, name="recipes")
+    def recipes_page(request: Request, q: str | None = None):
+        conn = app.state.db
+        recipes, total = _query_recipes(conn, q)
+        cover_books = [{"rel_path": r["rel_path"]} for r in recipes]
+        _attach_cover_urls(app, cover_books)
+        cover_map = {b["rel_path"]: b.get("cover_url") for b in cover_books}
+        for r in recipes:
+            r["cover_url"] = cover_map.get(r["rel_path"])
+            image_href = r.get("image_href") or ""
+            if image_href:
+                r["image_url"] = f"/recipe-image?path={quote(r['rel_path'])}&img={quote(image_href)}"
+            else:
+                r["image_url"] = r.get("cover_url")
+        return templates.TemplateResponse(
+            "recipes.html",
+            {
+                "request": request,
+                "recipes": recipes,
+                "total": total,
+                "q": (q or "").strip(),
+            },
+        )
+
     @app.get("/book", name="book")
     def book(path: str = Query(..., alias="path")):
         # Stream an EPUB/PDF using a query parameter. This avoids path-routing edge cases
         # with spaces, commas, and other characters.
         return file(path)
+
+    @app.get("/recipe-image", name="recipe_image")
+    def recipe_image(
+        path: str = Query(..., alias="path"),
+        img: str = Query(..., alias="img"),
+    ):
+        settings = get_settings()
+        file_path = _safe_resolve(settings.library_dir, path)
+        if file_path.suffix.lower() != ".epub":
+            raise HTTPException(status_code=404, detail="Not found")
+
+        from ebooklib import epub as epub_lib  # local import to keep startup fast
+
+        img_href = unquote(img).lstrip("/")
+        try:
+            book = epub_lib.read_epub(str(file_path))
+            item = book.get_item_with_href(img_href) or book.get_item_with_name(img_href)
+            if item is None:
+                for prefix in ("EPUB/", "OEBPS/"):
+                    if img_href.startswith(prefix):
+                        trimmed = img_href[len(prefix) :]
+                        item = book.get_item_with_href(trimmed) or book.get_item_with_name(trimmed)
+                        if item is not None:
+                            break
+            if item is None:
+                raise HTTPException(status_code=404, detail="Not found")
+            media_type = item.media_type or "application/octet-stream"
+            return Response(content=item.get_content(), media_type=media_type)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.warning("Recipe image fetch failed for %s: %s", img_href, exc)
+            raise HTTPException(status_code=404, detail="Not found") from exc
 
     @app.get("/file/{rel_path:path}", name="file")
     def file(rel_path: str):
