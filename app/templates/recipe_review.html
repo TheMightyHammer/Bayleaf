@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Recipe Review · Bayleaf</title>
+    <link rel="stylesheet" href="{{ request.url_for('static', path='app.css') }}" />
+    <link rel="icon" href="{{ request.url_for('static', path='favicon.ico') }}">
+    <meta name="theme-color" content="#5F7A6A" />
+  </head>
+  <body>
+    <div class="container">
+      <div class="topbar">
+        <div class="brandline">
+          <div class="brand">
+            <img
+              src="{{ request.url_for('static', path='Bayleaf_Logo.png') }}"
+              alt="Bayleaf logo"
+              class="brand-logo"
+            />
+            <h1>Recipe Review</h1>
+          </div>
+          <div class="meta">
+            {% if mode == "review" %}
+              Reviewing {{ review_book.title }}
+            {% else %}
+              Pick a book to review
+            {% endif %}
+          </div>
+        </div>
+
+        <div class="searchrow">
+          <a class="pillbtn" href="{{ request.url_for('home') }}">Library</a>
+          <a class="pillbtn" href="{{ request.url_for('recipes') }}">Recipes</a>
+          {% if mode == "review" %}
+            <a class="pillbtn" href="/admin/recipe-review">All books</a>
+          {% endif %}
+        </div>
+      </div>
+
+      {% if mode == "list" %}
+        {% if not review_books %}
+          <div class="notice">No EPUB books indexed yet. Re-scan the library first.</div>
+        {% else %}
+          <div class="grid review-grid">
+            {% for book in review_books %}
+              <a class="card-link" href="/admin/recipe-review?path={{ book.rel_path|urlencode }}">
+                <div class="card review-card">
+                  <div class="cover">
+                    {% set cover_src = book.cover_url or request.url_for('cover', rel_path=book.rel_path) %}
+                    <img
+                      src="{{ cover_src }}"
+                      alt="Cover for {{ book.title }}"
+                      loading="lazy"
+                      class="cover-img"
+                      onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';"
+                    />
+                    <div class="placeholder" style="display:none;">No cover yet</div>
+                  </div>
+                  <div class="book-meta">
+                    <div class="book-title">{{ book.title }}</div>
+                    <div class="book-author">
+                      {{ book.recipe_count }} recipe{% if book.recipe_count != 1 %}s{% endif %}
+                    </div>
+                    <div class="review-stats">
+                      <span>{{ book.reviewed_count }} reviewed</span>
+                      <span>{{ book.approved_count }} approved</span>
+                      <span>{{ book.rejected_count }} rejected</span>
+                      <span>{{ book.partial_count }} partial</span>
+                    </div>
+                  </div>
+                  <div class="card-cta">
+                    <button class="btn read-btn" type="button">Review</button>
+                  </div>
+                </div>
+              </a>
+            {% endfor %}
+          </div>
+        {% endif %}
+      {% else %}
+        <div class="review-summary">
+          <div class="review-summary-card">
+            <div class="review-summary-title">{{ review_book.title }}</div>
+            <div class="review-summary-meta">{{ review_book.rel_path }}</div>
+          </div>
+          <div class="review-summary-metrics">
+            <div><strong id="summaryTotal">{{ review_counts.total }}</strong> total</div>
+            <div><strong id="summaryReviewed">{{ review_counts.reviewed }}</strong> reviewed</div>
+            <div><strong id="summaryApproved">{{ review_counts.approved }}</strong> approved</div>
+            <div><strong id="summaryRejected">{{ review_counts.rejected }}</strong> rejected</div>
+            <div><strong id="summaryPartial">{{ review_counts.partial }}</strong> partial</div>
+            <div><strong id="summaryNeedsReview">{{ review_counts.needs_review }}</strong> needs review</div>
+          </div>
+        </div>
+
+        <div class="review-layout">
+          <aside class="review-list">
+            <div class="review-controls">
+              <input id="reviewSearch" type="text" placeholder="Filter recipes" autocomplete="off" />
+              <div class="review-filters">
+                <button class="btn review-filter active" data-filter="all" type="button">All</button>
+                <button class="btn review-filter" data-filter="unreviewed" type="button">Unreviewed</button>
+                <button class="btn review-filter" data-filter="approved" type="button">Approved</button>
+                <button class="btn review-filter" data-filter="partial" type="button">Partial</button>
+                <button class="btn review-filter" data-filter="rejected" type="button">Rejected</button>
+                <button class="btn review-filter" data-filter="needs_review" type="button">Needs review</button>
+              </div>
+            </div>
+            <div id="reviewItems" class="review-items"></div>
+          </aside>
+
+          <section class="review-detail">
+            <div class="review-reader">
+              <iframe id="reviewReader" title="Recipe reader"></iframe>
+              <div class="review-reader-actions">
+                <a id="openReader" class="btn" href="#" target="_blank" rel="noopener">Open in reader</a>
+              </div>
+            </div>
+
+            <div class="review-card detail-card">
+              <div class="review-title-row">
+                <h2 id="reviewTitle">Select a recipe</h2>
+                <span id="reviewStatus" class="review-pill">Unreviewed</span>
+              </div>
+
+              <div class="review-meta-row">
+                <div id="reviewMeta" class="review-meta-text"></div>
+              </div>
+
+              <div class="review-actions">
+                <button class="btn status-btn" data-status="approved" type="button">Looks good</button>
+                <button class="btn status-btn" data-status="partial" type="button">Partial</button>
+                <button class="btn status-btn" data-status="rejected" type="button">Not a recipe</button>
+                <button class="btn status-btn" data-status="needs_review" type="button">Needs review</button>
+                <button class="btn status-btn" data-status="clear" type="button">Clear</button>
+              </div>
+
+              <div class="review-note">
+                <label for="reviewNote">Notes</label>
+                <textarea id="reviewNote" rows="3" placeholder="Add a note for this recipe"></textarea>
+                <button id="reviewSaveNote" class="btn" type="button">Save note</button>
+              </div>
+
+              <div class="review-visual">
+                <img id="reviewImage" alt="Recipe image" />
+              </div>
+
+              <div class="review-section">
+                <h3>Ingredients</h3>
+                <ul id="reviewIngredients"></ul>
+              </div>
+
+              <div class="review-section">
+                <h3>Method</h3>
+                <div id="reviewMethod" class="review-text"></div>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <script type="application/json" id="reviewData">{{ review_json|safe }}</script>
+        <script>
+          const reviewData = JSON.parse(document.getElementById("reviewData").textContent || "{}");
+          const book = reviewData.book || {};
+          const recipes = reviewData.recipes || [];
+          const reader = document.getElementById("reviewReader");
+          const openReader = document.getElementById("openReader");
+          const titleEl = document.getElementById("reviewTitle");
+          const statusEl = document.getElementById("reviewStatus");
+          const metaEl = document.getElementById("reviewMeta");
+          const noteEl = document.getElementById("reviewNote");
+          const imageEl = document.getElementById("reviewImage");
+          const ingredientsEl = document.getElementById("reviewIngredients");
+          const methodEl = document.getElementById("reviewMethod");
+          const itemsEl = document.getElementById("reviewItems");
+          const filterEls = Array.from(document.querySelectorAll(".review-filter"));
+          const searchEl = document.getElementById("reviewSearch");
+
+          let activeId = null;
+          let activeFilter = "all";
+
+          function statusLabel(status) {
+            if (!status) return "Unreviewed";
+            if (status === "approved") return "Approved";
+            if (status === "rejected") return "Rejected";
+            if (status === "partial") return "Partial";
+            if (status === "needs_review") return "Needs review";
+            return status;
+          }
+
+          function statusClass(status) {
+            if (!status) return "status-unreviewed";
+            return `status-${status}`;
+          }
+
+          function recipeMatchesFilter(recipe) {
+            const status = recipe.status || "";
+            if (activeFilter === "all") return true;
+            if (activeFilter === "unreviewed") return !status;
+            return status === activeFilter;
+          }
+
+          function recipeMatchesSearch(recipe) {
+            const q = (searchEl?.value || "").trim().toLowerCase();
+            if (!q) return true;
+            const hay = `${recipe.title || ""} ${recipe.ingredients_text || ""} ${recipe.method_text || ""}`.toLowerCase();
+            return hay.includes(q);
+          }
+
+          function renderList() {
+            if (!itemsEl) return;
+            const filtered = recipes.filter((r) => recipeMatchesFilter(r) && recipeMatchesSearch(r));
+            if (!filtered.length) {
+              itemsEl.innerHTML = `<div class="notice">No recipes match this filter.</div>`;
+              return;
+            }
+            itemsEl.innerHTML = filtered
+              .map((r) => {
+                const status = r.status || "";
+                const statusText = statusLabel(status);
+                return `
+                  <button class="review-item ${activeId === r.id ? "active" : ""}" data-id="${r.id}" type="button">
+                    <div class="review-item-title">${r.title || "Untitled recipe"}</div>
+                    <div class="review-item-meta">
+                      <span class="review-pill ${statusClass(status)}">${statusText}</span>
+                      <span>${r.ingredients_text ? "Ingredients" : "No ingredients"}</span>
+                      <span>${r.method_text ? "Method" : "No method"}</span>
+                    </div>
+                  </button>
+                `;
+              })
+              .join("");
+
+            Array.from(itemsEl.querySelectorAll(".review-item")).forEach((btn) => {
+              btn.addEventListener("click", () => {
+                const id = parseInt(btn.dataset.id || "0", 10);
+                setActive(id);
+              });
+            });
+          }
+
+          function updateSummary() {
+            const total = recipes.length;
+            const reviewed = recipes.filter((r) => r.status).length;
+            const approved = recipes.filter((r) => r.status === "approved").length;
+            const rejected = recipes.filter((r) => r.status === "rejected").length;
+            const partial = recipes.filter((r) => r.status === "partial").length;
+            const needsReview = recipes.filter((r) => r.status === "needs_review").length;
+            document.getElementById("summaryTotal").textContent = total;
+            document.getElementById("summaryReviewed").textContent = reviewed;
+            document.getElementById("summaryApproved").textContent = approved;
+            document.getElementById("summaryRejected").textContent = rejected;
+            document.getElementById("summaryPartial").textContent = partial;
+            document.getElementById("summaryNeedsReview").textContent = needsReview;
+          }
+
+          function setActive(id) {
+            const recipe = recipes.find((r) => r.id === id);
+            if (!recipe) return;
+            activeId = id;
+            titleEl.textContent = recipe.title || "Untitled recipe";
+            const status = recipe.status || "";
+            statusEl.textContent = statusLabel(status);
+            statusEl.className = `review-pill ${statusClass(status)}`;
+            noteEl.value = recipe.note || "";
+
+            const hasIngredients = Boolean(recipe.ingredients_text);
+            const hasMethod = Boolean(recipe.method_text);
+            metaEl.textContent = `${hasIngredients ? "Ingredients" : "No ingredients"} · ${hasMethod ? "Method" : "No method"}`;
+
+            if (recipe.image_url) {
+              imageEl.src = recipe.image_url;
+              imageEl.style.display = "block";
+            } else {
+              imageEl.removeAttribute("src");
+              imageEl.style.display = "none";
+            }
+
+            const ingredients = (recipe.ingredients_text || "").split("\n").map((t) => t.trim()).filter(Boolean);
+            if (!ingredients.length) {
+              ingredientsEl.innerHTML = "<li class=\"muted\">No ingredients parsed.</li>";
+            } else {
+              ingredientsEl.innerHTML = ingredients.map((item) => `<li>${item}</li>`).join("");
+            }
+
+            methodEl.textContent = recipe.method_text || "No method parsed.";
+
+            const loc = recipe.location_value || "";
+            const base = `/read?path=${encodeURIComponent(book.rel_path || "")}`;
+            const url = loc ? `${base}&loc=${encodeURIComponent(loc)}` : base;
+            reader.src = url;
+            openReader.href = url;
+
+            renderList();
+          }
+
+          async function saveReview(status) {
+            const recipe = recipes.find((r) => r.id === activeId);
+            if (!recipe) return;
+
+            const payload = {
+              recipe_id: recipe.id,
+              status: status,
+              note: noteEl.value || "",
+            };
+
+            try {
+              const res = await fetch("/admin/recipe-review", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+              });
+              if (!res.ok) {
+                const txt = await res.text();
+                throw new Error(txt || `HTTP ${res.status}`);
+              }
+              const data = await res.json();
+              if (status === "clear") {
+                recipe.status = null;
+                recipe.note = null;
+              } else {
+                recipe.status = data.status || status;
+                recipe.note = data.note || noteEl.value || "";
+              }
+              updateSummary();
+              setActive(recipe.id);
+            } catch (err) {
+              console.error(err);
+            }
+          }
+
+          filterEls.forEach((btn) => {
+            btn.addEventListener("click", () => {
+              filterEls.forEach((b) => b.classList.remove("active"));
+              btn.classList.add("active");
+              activeFilter = btn.dataset.filter || "all";
+              renderList();
+            });
+          });
+
+          searchEl?.addEventListener("input", () => {
+            renderList();
+          });
+
+          document.querySelectorAll(".status-btn").forEach((btn) => {
+            btn.addEventListener("click", () => {
+              saveReview(btn.dataset.status || "");
+            });
+          });
+
+          document.getElementById("reviewSaveNote")?.addEventListener("click", () => {
+            const recipe = recipes.find((r) => r.id === activeId);
+            const status = recipe?.status || "needs_review";
+            saveReview(status);
+          });
+
+          if (recipes.length) {
+            setActive(recipes[0].id);
+          } else {
+            itemsEl.innerHTML = `<div class="notice">No recipes found for this book. Try re-extracting.</div>`;
+          }
+        </script>
+      {% endif %}
+    </div>
+  </body>
+</html>

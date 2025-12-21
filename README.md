@@ -14,6 +14,11 @@ A self-hosted web app that indexes local EPUB and PDF cookbooks, extracts recipe
 - [x] Ensure recipe records are inserted with correct href + image href
 - [x] Add a manual "re-extract recipes for this book" action in the UI
 
+## Recipe extraction controls
+- `BAYLEAF_RECIPE_INDEX_LIMIT` (default `5`, set `0` to index all EPUBs)
+- `BAYLEAF_RECIPE_INDEX_ALLOWLIST` (comma-separated rel paths or filenames to extract)
+- `BAYLEAF_RECIPE_REVIEW_ENABLED` (default `false`)
+
 ## Session notes (2024-12-20)
 - Switched recipe extraction to prefer EPUB index anchors (from MVP engine) with fallback to section parsing
 - Added image extraction based on recipe href to populate recipe cards

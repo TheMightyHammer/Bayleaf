@@ -172,6 +172,10 @@ def looks_like_index_doc(item, soup: BeautifulSoup) -> bool:
     return len(links) >= 20 and ratio > 0.5
 
 
+def _has_nav_toc(soup: BeautifulSoup) -> bool:
+    return soup.find("nav", attrs={"epub:type": "toc"}) is not None
+
+
 def extract_index_entries_from_doc(
     book: epub.EpubBook,
     book_path: Path,
@@ -198,9 +202,9 @@ def extract_index_entries_from_doc(
         if href and "#pg" in href.lower():
             continue
 
-        # Only keep links that clearly point into a chapter and a specific anchor
-        # e.g. "chapter003_01.xhtml#cru0001918"
-        if not (href and "chapter" in href.lower() and "#" in href):
+        # Only keep links that point into a specific anchor.
+        # Examples: "chapter003_01.xhtml#cru0001918" or "xhtml/c03.xhtml#page_61_anchor"
+        if not (href and "#" in href):
             continue
 
         # Exact-title blacklist for common non-recipe entries
@@ -249,11 +253,19 @@ def extract_recipes_from_epub_index(book_path: Path) -> List[Recipe]:
     # For v1, we will simply try to detect index docs and ignore section grouping.
 
     recipes: List[Recipe] = []
+    nav_docs: List[tuple] = []
+    index_docs: List[tuple] = []
 
     for item, soup in iter_document_items(book):
-        if not looks_like_index_doc(item, soup):
+        if _has_nav_toc(soup):
+            nav_docs.append((item, soup))
             continue
+        if looks_like_index_doc(item, soup):
+            index_docs.append((item, soup))
 
+    docs = nav_docs if nav_docs else index_docs
+
+    for item, soup in docs:
         # In future. derive section_hint from the context or heading text.
         section_hint = None
         doc_recipes = extract_index_entries_from_doc(

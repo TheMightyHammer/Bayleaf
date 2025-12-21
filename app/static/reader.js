@@ -51,7 +51,6 @@
     fontSize: 18,
     zoom: 1,
     background: 'parchment',
-    text: 'ink',
   };
 
   const COLOR_PRESETS = {
@@ -98,30 +97,32 @@
       fontSize: Math.min(28, Math.max(12, fontSize)),
       zoom: Math.min(1.5, Math.max(0.7, zoom)),
       background: settings.background || DEFAULT_SETTINGS.background,
-      text: settings.text || DEFAULT_SETTINGS.text,
     };
   }
 
   function applySettings(rendition, settings, viewer) {
     const normalized = normalizeSettings(settings);
     const bg = COLOR_PRESETS.background[normalized.background] || COLOR_PRESETS.background.parchment;
-    const fg = COLOR_PRESETS.text[normalized.text] || COLOR_PRESETS.text.ink;
-    const effectiveSize = Math.round(normalized.fontSize * normalized.zoom);
+    const fg = normalized.background === 'night' ? COLOR_PRESETS.text.cream : COLOR_PRESETS.text.ink;
+    const effectiveSize = Math.round(normalized.fontSize);
 
     if (viewer) {
       viewer.style.background = bg;
+      viewer.style.setProperty('--reader-zoom', normalized.zoom);
     }
 
     rendition.themes.override('body', 'background', `${bg} !important`);
     rendition.themes.override('body', 'color', `${fg} !important`);
     rendition.themes.override('a', 'color', `${fg} !important`);
     rendition.themes.override('html', 'color', `${fg} !important`);
+    rendition.themes.override('html', 'font-size', `${effectiveSize}px !important`);
     rendition.themes.override('body', 'font-size', `${effectiveSize}px !important`);
     rendition.themes.fontSize(`${effectiveSize}px`);
 
     const textSelectors = ['p', 'li', 'span', 'div', 'blockquote', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'];
     textSelectors.forEach((sel) => {
       rendition.themes.override(sel, 'color', `${fg} !important`);
+      rendition.themes.override(sel, 'font-size', `${effectiveSize}px !important`);
     });
   }
 
@@ -129,11 +130,10 @@
     const fontSizeInput = qs('#settingFontSize');
     const zoomInput = qs('#settingZoom');
     const bgSelect = qs('#settingBackground');
-    const textSelect = qs('#settingText');
     const fontSizeValue = qs('#settingFontSizeValue');
     const zoomValue = qs('#settingZoomValue');
 
-    if (!fontSizeInput || !zoomInput || !bgSelect || !textSelect) return;
+    if (!fontSizeInput || !zoomInput || !bgSelect) return;
 
     function updateValueLabels(next) {
       if (fontSizeValue) fontSizeValue.textContent = `${next.fontSize}px`;
@@ -144,7 +144,6 @@
       fontSizeInput.value = String(next.fontSize);
       zoomInput.value = String(next.zoom);
       bgSelect.value = next.background;
-      textSelect.value = next.text;
       updateValueLabels(next);
     }
 
@@ -154,7 +153,6 @@
         fontSize: parseFloat(fontSizeInput.value),
         zoom: parseFloat(zoomInput.value),
         background: bgSelect.value,
-        text: textSelect.value,
       });
     }
 
@@ -171,7 +169,6 @@
     fontSizeInput.addEventListener('input', applyFromUI);
     zoomInput.addEventListener('input', applyFromUI);
     bgSelect.addEventListener('change', applyFromUI);
-    textSelect.addEventListener('change', applyFromUI);
   }
 
   function resolveBookUrl() {
@@ -218,9 +215,16 @@
 
     // Keyboard navigation
     window.addEventListener('keydown', (e) => {
-      // Ignore when typing in inputs
-      const tag = (document.activeElement?.tagName || '').toLowerCase();
-      if (tag === 'input' || tag === 'textarea' || document.activeElement?.isContentEditable) return;
+      const active = document.activeElement;
+      const tag = (active?.tagName || '').toLowerCase();
+      const isRange = active && active.matches?.('input[type="range"], select');
+      if (isRange && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+        e.preventDefault();
+        if (e.key === 'ArrowLeft') rendition.prev();
+        if (e.key === 'ArrowRight') rendition.next();
+        return;
+      }
+      if (tag === 'input' || tag === 'textarea' || active?.isContentEditable) return;
 
       if (e.key === 'ArrowLeft') {
         e.preventDefault();
@@ -274,8 +278,7 @@
         'background': '#f8f2e7 !important',
         'color': '#2b2722 !important',
         'line-height': '1.6 !important',
-        'font-family': '"Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", "Georgia", serif !important',
-        'font-size': '18px !important',
+        'font-family': '"Spectral", "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", "Georgia", serif !important',
         'padding': '22px 30px !important',
       },
       'p': {

@@ -305,6 +305,7 @@ class CrumbsParser(HTMLParser):
         self.recipes: List[dict] = []
         self._current: dict | None = None
         self._capture: str | None = None
+        self._capture_tag: str | None = None
         self._buf: List[str] = []
         self._ingredient_section: Optional[str] = None
         self._in_tip = False
@@ -350,6 +351,11 @@ class CrumbsParser(HTMLParser):
         self._current = None
 
     def _push_text(self, text: str) -> None:
+        if self._capture == "recipe_title":
+            title = text.strip()
+            if title:
+                self._start_recipe(title, self._pending_recipe_id)
+            return
         if not self._current:
             return
         if self._capture == "ingredient_header":
@@ -373,10 +379,6 @@ class CrumbsParser(HTMLParser):
             line = text.strip()
             if line and not self._in_tip:
                 self._current["method"].append(line)
-        elif self._capture == "recipe_title":
-            title = text.strip()
-            if title:
-                self._start_recipe(title, self._pending_recipe_id)
 
     def handle_starttag(self, tag: str, attrs: List[tuple[str, Optional[str]]]) -> None:
         attr_map = {k: v for k, v in attrs}
@@ -384,28 +386,33 @@ class CrumbsParser(HTMLParser):
 
         if tag == "h2" and _has_class(classes, "rec_head", "recipe_head", "rec_title", "rec-title"):
             self._capture = "recipe_title"
+            self._capture_tag = tag
             self._buf = []
             self._pending_recipe_id = attr_map.get("id")
             return
 
         if tag == "h5" and _has_class(classes, "ingredient_header", "ingredient-head", "ingredient_title"):
             self._capture = "ingredient_header"
+            self._capture_tag = tag
             self._buf = []
             return
 
         if tag == "li" and _has_class(classes, "ingred", "ingredient", "ingredient_item"):
             self._capture = "ingredient_item"
+            self._capture_tag = tag
             self._buf = []
             return
 
         if tag == "h4" and _has_class(classes, "rec_subhead", "rec-subhead", "method_head"):
             self._in_tip = False
             self._capture = "method_heading"
+            self._capture_tag = tag
             self._buf = []
             return
 
         if tag == "h4" and _has_class(classes, "tip_head", "tip-head", "tip_subhead"):
             self._capture = "method_heading"
+            self._capture_tag = tag
             self._buf = []
             self._in_tip = True
             return
@@ -422,6 +429,7 @@ class CrumbsParser(HTMLParser):
             )
         ):
             self._capture = "method"
+            self._capture_tag = tag
             self._buf = []
             return
 
@@ -442,10 +450,13 @@ class CrumbsParser(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         if not self._capture:
             return
+        if self._capture_tag and tag != self._capture_tag:
+            return
         text = " ".join(" ".join(self._buf).split()).strip()
         if text:
             self._push_text(text)
         self._capture = None
+        self._capture_tag = None
         self._buf = []
 
 

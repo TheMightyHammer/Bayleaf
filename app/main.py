@@ -8,6 +8,7 @@ Next milestone: SQLite-backed indexing for fast library plus recipe metadata.
 import os
 import sqlite3
 import hashlib
+import json
 from pathlib import Path
 import zipfile
 import xml.etree.ElementTree as ET
@@ -39,12 +40,19 @@ from app.recipes import extract_epub_recipes
 
 
 APP_NAME = "Bayleaf"
+REVIEW_STATUSES = {"approved", "rejected", "partial", "needs_review"}
 
 # Minimum characters before we apply a text filter (helps live-search UX)
 DEFAULT_MIN_SEARCH_CHARS = 3
 
 class ProgressIn(BaseModel):
     cfi: str
+
+
+class RecipeReviewIn(BaseModel):
+    recipe_id: int
+    status: str
+    note: str | None = None
 
 def _min_search_chars() -> int:
     try:
@@ -62,6 +70,10 @@ def _normalise_search_query(q: str | None) -> str:
     if len(qn) < _min_search_chars():
         return ""
     return qn
+
+
+def _normalise_rel_path(value: str | None) -> str:
+    return (value or "").strip().replace("\\", "/").lower()
 
 
 # --- EPUB metadata helpers (no external deps) ---
@@ -475,6 +487,17 @@ def _init_db(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_recipe_tags_tag_id ON recipe_tags(tag_id);
 
+        CREATE TABLE IF NOT EXISTS recipe_reviews (
+          recipe_id INTEGER PRIMARY KEY,
+          status TEXT NOT NULL,
+          note TEXT,
+          created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          FOREIGN KEY(recipe_id) REFERENCES recipes(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_recipe_reviews_status ON recipe_reviews(status);
+
         -- Optional but useful: track indexing runs for debugging.
         CREATE TABLE IF NOT EXISTS indexing_runs (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -706,8 +729,10 @@ def _index_recipes(
     library_dir: Path,
     book_dicts: list[dict],
     recipe_book_limit: int,
+    recipe_allowlist: tuple[str, ...],
 ) -> int:
     root = Path(library_dir)
+    allowlist = {_normalise_rel_path(item) for item in recipe_allowlist if item}
     candidates = []
     for b in book_dicts:
         rel_path = str(b.get("rel_path") or "")
@@ -715,6 +740,12 @@ def _index_recipes(
         suffix = str(suffix_value or "").lower()
         if suffix != ".epub":
             continue
+        if allowlist:
+            file_name = str(b.get("file_name") or Path(rel_path).name)
+            rel_norm = _normalise_rel_path(rel_path)
+            file_norm = _normalise_rel_path(file_name)
+            if rel_norm not in allowlist and file_norm not in allowlist:
+                continue
         candidates.append(b)
 
     extracted = 0
@@ -723,9 +754,10 @@ def _index_recipes(
     limit = None if recipe_book_limit <= 0 else recipe_book_limit
     if candidates:
         logger.info(
-            "Recipe extraction starting: epubs=%s limit=%s",
+            "Recipe extraction starting: epubs=%s limit=%s allowlist=%s",
             len(candidates),
             limit if limit is not None else "all",
+            len(allowlist),
         )
     for b in candidates[:limit]:
         rel_path = str(b.get("rel_path") or "")
@@ -953,7 +985,11 @@ def _index_books(conn: sqlite3.Connection, library_dir: Path | str) -> tuple[int
     try:
         settings = get_settings()
         recipes_indexed = _index_recipes(
-            conn, root, book_dicts, settings.recipe_index_limit
+            conn,
+            root,
+            book_dicts,
+            settings.recipe_index_limit,
+            settings.recipe_index_allowlist,
         )
     except Exception as exc:
         logger.warning("Recipe indexing skipped: %s", exc)
@@ -1078,6 +1114,83 @@ def _query_recipes(conn: sqlite3.Connection, q: str | None) -> tuple[list[dict],
 
     total = len(recipes)
     return recipes, total
+
+
+def _query_review_books(conn: sqlite3.Connection) -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT
+          b.id,
+          b.rel_path,
+          coalesce(b.title, b.file_name) AS title,
+          b.file_type,
+          COUNT(r.id) AS recipe_count,
+          SUM(CASE WHEN rr.status IS NOT NULL THEN 1 ELSE 0 END) AS reviewed_count,
+          SUM(CASE WHEN rr.status = 'approved' THEN 1 ELSE 0 END) AS approved_count,
+          SUM(CASE WHEN rr.status = 'rejected' THEN 1 ELSE 0 END) AS rejected_count,
+          SUM(CASE WHEN rr.status = 'partial' THEN 1 ELSE 0 END) AS partial_count
+        FROM books b
+        LEFT JOIN recipes r ON r.book_id = b.id
+        LEFT JOIN recipe_reviews rr ON rr.recipe_id = r.id
+        WHERE lower(b.file_type) = 'epub'
+        GROUP BY b.id
+        ORDER BY coalesce(b.title, b.file_name) COLLATE NOCASE ASC
+        """
+    ).fetchall()
+
+    books: list[dict] = []
+    for row in rows:
+        books.append(
+            {
+                "id": row["id"],
+                "rel_path": row["rel_path"],
+                "title": row["title"],
+                "file_type": row["file_type"],
+                "recipe_count": int(row["recipe_count"] or 0),
+                "reviewed_count": int(row["reviewed_count"] or 0),
+                "approved_count": int(row["approved_count"] or 0),
+                "rejected_count": int(row["rejected_count"] or 0),
+                "partial_count": int(row["partial_count"] or 0),
+            }
+        )
+    return books
+
+
+def _query_review_recipes(conn: sqlite3.Connection, book_id: int) -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT
+          r.id,
+          r.title,
+          r.ingredients_text,
+          r.method_text,
+          r.location_value,
+          r.image_href,
+          rr.status,
+          rr.note
+        FROM recipes r
+        LEFT JOIN recipe_reviews rr ON rr.recipe_id = r.id
+        WHERE r.book_id = ?
+        ORDER BY r.title COLLATE NOCASE ASC
+        """,
+        (book_id,),
+    ).fetchall()
+
+    recipes: list[dict] = []
+    for row in rows:
+        recipes.append(
+            {
+                "id": row["id"],
+                "title": row["title"],
+                "ingredients_text": row["ingredients_text"],
+                "method_text": row["method_text"],
+                "location_value": row["location_value"],
+                "image_href": row["image_href"],
+                "status": row["status"],
+                "note": row["note"],
+            }
+        )
+    return recipes
 
 
 # --- API query helper for live-search ---
@@ -1469,6 +1582,133 @@ def create_app() -> FastAPI:
             logger.exception("Admin reindex failed: %s", exc)
             raise HTTPException(status_code=500, detail=str(exc))
 
+    @app.get("/admin/recipe-review", response_class=HTMLResponse)
+    def admin_recipe_review(
+        request: Request,
+        path: str | None = Query(None, alias="path"),
+    ):
+        _ensure_indexed(app)
+        conn: sqlite3.Connection = app.state.db
+        settings = get_settings()
+        if not settings.recipe_review_enabled:
+            raise HTTPException(status_code=404, detail="Recipe review disabled")
+
+        if not path:
+            books = _query_review_books(conn)
+            if books:
+                _attach_cover_urls(app, books)
+            return templates.TemplateResponse(
+                "recipe_review.html",
+                {
+                    "request": request,
+                    "mode": "list",
+                    "review_books": books,
+                },
+            )
+
+        file_path = _safe_resolve(settings.library_dir, path)
+        if file_path.suffix.lower() != ".epub":
+            raise HTTPException(status_code=400, detail="Only EPUB files are supported")
+
+        row = conn.execute(
+            """
+            SELECT id, rel_path, file_name, coalesce(title, file_name) AS display_title
+            FROM books
+            WHERE rel_path = ?
+            """,
+            (path,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Book not indexed")
+
+        book = {
+            "id": int(row["id"]),
+            "rel_path": row["rel_path"],
+            "title": (row["display_title"] or "").strip() or Path(path).stem,
+        }
+        _attach_cover_urls(app, [book])
+
+        recipes = _query_review_recipes(conn, book["id"])
+        for recipe in recipes:
+            image_href = recipe.get("image_href") or ""
+            if image_href:
+                recipe["image_url"] = (
+                    f"/recipe-image?path={quote(book['rel_path'])}&img={quote(image_href)}"
+                )
+            else:
+                recipe["image_url"] = book.get("cover_url") or ""
+
+        review_json = json.dumps(
+            {
+                "book": book,
+                "recipes": recipes,
+            },
+            ensure_ascii=False,
+        ).replace("</", "<\\/")
+
+        counts = {
+            "total": len(recipes),
+            "reviewed": sum(1 for r in recipes if r.get("status")),
+            "approved": sum(1 for r in recipes if r.get("status") == "approved"),
+            "rejected": sum(1 for r in recipes if r.get("status") == "rejected"),
+            "partial": sum(1 for r in recipes if r.get("status") == "partial"),
+            "needs_review": sum(1 for r in recipes if r.get("status") == "needs_review"),
+        }
+
+        return templates.TemplateResponse(
+            "recipe_review.html",
+            {
+                "request": request,
+                "mode": "review",
+                "review_book": book,
+                "review_counts": counts,
+                "review_json": review_json,
+            },
+        )
+
+    @app.post("/admin/recipe-review", response_class=JSONResponse)
+    def admin_recipe_review_update(payload: RecipeReviewIn) -> dict:
+        settings = get_settings()
+        if not settings.recipe_review_enabled:
+            raise HTTPException(status_code=404, detail="Recipe review disabled")
+        conn: sqlite3.Connection = app.state.db
+        recipe_id = int(payload.recipe_id)
+        status = (payload.status or "").strip().lower()
+        note = (payload.note or "").strip() or None
+
+        if status == "clear":
+            with conn:
+                conn.execute(
+                    "DELETE FROM recipe_reviews WHERE recipe_id = ?",
+                    (recipe_id,),
+                )
+            return {"status": "cleared"}
+
+        if status not in REVIEW_STATUSES:
+            raise HTTPException(status_code=400, detail="Invalid status")
+
+        exists = conn.execute(
+            "SELECT 1 FROM recipes WHERE id = ?",
+            (recipe_id,),
+        ).fetchone()
+        if exists is None:
+            raise HTTPException(status_code=404, detail="Recipe not found")
+
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO recipe_reviews (recipe_id, status, note)
+                VALUES (?, ?, ?)
+                ON CONFLICT(recipe_id) DO UPDATE SET
+                  status=excluded.status,
+                  note=excluded.note,
+                  updated_at=unixepoch()
+                """,
+                (recipe_id, status, note),
+            )
+
+        return {"status": status, "note": note}
+
     @app.get("/admin/recipe-report", response_class=JSONResponse)
     def admin_recipe_report(
         path: str = Query(..., alias="path"),
@@ -1594,6 +1834,7 @@ def create_app() -> FastAPI:
                 "sort": (sort or "title").strip(),
                 "library_dir": str(settings.library_dir),
                 "notice": notice,
+                "recipe_review_enabled": settings.recipe_review_enabled,
             },
         )
 
