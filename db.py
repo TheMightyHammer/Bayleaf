@@ -1,3 +1,5 @@
+import argparse
+import os
 import sqlite3
 from pathlib import Path
 
@@ -66,3 +68,39 @@ def connect(db_path: str) -> sqlite3.Connection:
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA_SQL)
     conn.commit()
+
+
+def vacuum_db(db_path: str) -> None:
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.isolation_level = None
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+        conn.execute("VACUUM;")
+    finally:
+        conn.close()
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Bayleaf database maintenance.")
+    parser.add_argument(
+        "command",
+        choices=["vacuum"],
+        help="Maintenance command to run.",
+    )
+    parser.add_argument(
+        "--db-path",
+        default=os.environ.get("BAYLEAF_DB_PATH", "/data/bayleaf.db"),
+        help="Path to the SQLite database.",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = _parse_args()
+    if args.command == "vacuum":
+        vacuum_db(args.db_path)
+        print(f"Vacuumed database at {args.db_path}")
+
+
+if __name__ == "__main__":
+    main()
